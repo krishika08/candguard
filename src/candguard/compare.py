@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .audit import AuditError
+from .metrics import compute_relative_growth
+from .models import AuditError, validate_compare_threshold
+from .reporting import render_compare_text
+
+__all__ = [
+    "AuditError",
+    "compare_reports",
+    "render_compare_text",
+]
 
 
 def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]]:
@@ -73,15 +81,7 @@ def compare_reports(
         ("max_pair_growth", max_pair_growth),
         ("max_duplicate_growth", max_duplicate_growth),
     ):
-        if threshold is not None:
-            if (
-                not isinstance(threshold, (int, float))
-                or isinstance(threshold, bool)
-                or math.isnan(threshold)
-                or math.isinf(threshold)
-                or threshold < 0
-            ):
-                raise AuditError(f"{name} must be a finite non-negative number, got {threshold!r}.")
+        validate_compare_threshold(name, threshold)
 
     baseline_file, baseline = _load_report(baseline_path, "Baseline")
     current_file, current = _load_report(current_path, "Current")
@@ -142,17 +142,11 @@ def compare_reports(
 
     base_rows = baseline["inputs"]["candidate_rows"]
     curr_rows = current["inputs"]["candidate_rows"]
-    if base_rows == 0:
-        pair_growth = 0.0 if curr_rows == 0 else float("inf")
-    else:
-        pair_growth = (curr_rows - base_rows) / base_rows
+    pair_growth = compute_relative_growth(base_rows, curr_rows)
 
     base_dupes = baseline["inputs"]["duplicate_candidate_rows"]
     curr_dupes = current["inputs"]["duplicate_candidate_rows"]
-    if base_dupes == 0:
-        duplicate_growth = 0.0 if curr_dupes == 0 else float("inf")
-    else:
-        duplicate_growth = (curr_dupes - base_dupes) / base_dupes
+    duplicate_growth = compute_relative_growth(base_dupes, curr_dupes)
 
     # Threshold gate evaluation
     failures: list[str] = []
@@ -231,67 +225,3 @@ def compare_reports(
             "failures": failures,
         },
     }
-
-
-def render_compare_text(report: dict[str, Any]) -> str:
-    baseline = report["baseline"]
-    current = report["current"]
-    metrics = report["metrics"]
-    gate = report["quality_gate"]
-
-    base_rows = baseline["candidate_rows"]
-    curr_rows = current["candidate_rows"]
-    p_unbounded = metrics["candidate_pair_growth_unbounded"]
-    p_growth = metrics["candidate_pair_growth"]
-    if p_unbounded:
-        row_growth_str = " (unbounded growth)"
-    elif p_growth is not None:
-        row_growth_str = f" ({'+' if p_growth >= 0 else ''}{p_growth:.2%})"
-    else:
-        row_growth_str = ""
-
-    base_uniq = baseline["unique_candidate_pairs"]
-    curr_uniq = current["unique_candidate_pairs"]
-    if base_uniq == 0:
-        uniq_growth_str = " (0.00%)" if curr_uniq == 0 else " (unbounded growth)"
-    else:
-        u_growth = (curr_uniq - base_uniq) / base_uniq
-        uniq_growth_str = f" ({'+' if u_growth >= 0 else ''}{u_growth:.2%})"
-
-    base_dupes = baseline["duplicate_candidate_rows"]
-    curr_dupes = current["duplicate_candidate_rows"]
-    d_unbounded = metrics["duplicate_row_growth_unbounded"]
-    d_growth = metrics["duplicate_row_growth"]
-    if d_unbounded:
-        dupe_growth_str = " (unbounded growth)"
-    elif d_growth is not None:
-        dupe_growth_str = f" ({'+' if d_growth >= 0 else ''}{d_growth:.2%})"
-    else:
-        dupe_growth_str = ""
-
-    base_rec = baseline["candidate_recall"]
-    curr_rec = current["candidate_recall"]
-    if base_rec is not None and curr_rec is not None:
-        r_drop = metrics["recall_drop"]
-        recall_str = f"{base_rec:.4%} -> {curr_rec:.4%} (drop: {r_drop:.4f})"
-    elif base_rec is not None or curr_rec is not None:
-        recall_str = f"{base_rec} -> {curr_rec}"
-    else:
-        recall_str = "n/a"
-
-    lines = [
-        "CandGuard — Regression Comparison Audit",
-        "=" * 42,
-        f"Baseline report:                {baseline['path']}",
-        f"Current report:                 {current['path']}",
-        f"Linkage type:                   {baseline['linkage_type']}",
-        "",
-        f"Candidate rows:                 {base_rows:,} -> {curr_rows:,}{row_growth_str}",
-        f"Unique candidate pairs:         {base_uniq:,} -> {curr_uniq:,}{uniq_growth_str}",
-        f"Duplicate candidate rows:       {base_dupes:,} -> {curr_dupes:,}{dupe_growth_str}",
-        f"Candidate recall:               {recall_str}",
-        "",
-        f"Quality gate: {'PASS' if gate['passed'] else 'FAIL'}",
-    ]
-    lines.extend(f"  - {failure}" for failure in gate["failures"])
-    return "\n".join(lines)
