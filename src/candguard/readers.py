@@ -156,6 +156,19 @@ class DelimitedReader:
             raise AuditError(f"Could not parse delimited file {self._path}: {exc}") from exc
 
     def iter_batches(self, batch_size: int = 50_000) -> Iterator[list[tuple[str, str]]]:
+        """Yield batches of pair tuples for bulk ingestion.
+
+        Args:
+            batch_size: Positive maximum number of pairs per batch.
+
+        Yields:
+            Lists of (left_id, right_id) pair tuples.
+
+        Raises:
+            AuditError: If batch_size is less than or equal to zero.
+        """
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+            raise AuditError(f"batch_size must be a positive integer, got {batch_size!r}.")
         batch: list[tuple[str, str]] = []
         for pair in self.iter_pairs():
             batch.append(pair)
