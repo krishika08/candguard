@@ -14,6 +14,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +66,78 @@ def test_reader_protocol_and_batch_contract(tmp_path: Path) -> None:
     assert len(batches[1]) == 10
     assert len(batches[2]) == 5
     assert sum(len(b) for b in batches) == 25
+
+
+def test_reader_batch_size_validation(tmp_path: Path) -> None:
+    """Verify batch size validation in DelimitedReader.iter_batches."""
+    file_path = tmp_path / "pairs.tsv"
+    with file_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+        writer.writerow(["left_id", "right_id"])
+        for i in range(5):
+            writer.writerow([f"src_{i}", f"tgt_{i}"])
+
+    reader = get_reader(file_path, "left_id", "right_id")
+
+    # Reject batch_size = 0
+    with pytest.raises(AuditError, match="batch_size must be a positive integer, got 0"):
+        list(reader.iter_batches(batch_size=0))
+
+    # Reject negative batch sizes
+    with pytest.raises(AuditError, match="batch_size must be a positive integer, got -1"):
+        list(reader.iter_batches(batch_size=-1))
+    with pytest.raises(AuditError, match="batch_size must be a positive integer, got -50"):
+        list(reader.iter_batches(batch_size=-50))
+
+    # batch_size = 1
+    batches_1 = list(reader.iter_batches(batch_size=1))
+    assert len(batches_1) == 5
+    assert all(len(b) == 1 for b in batches_1)
+
+    # normal batch sizes
+    batches_normal = list(reader.iter_batches(batch_size=5))
+    assert len(batches_normal) == 1
+    assert len(batches_normal[0]) == 5
+
+    # partial final batches
+    batches_partial = list(reader.iter_batches(batch_size=2))
+    assert len(batches_partial) == 3
+    assert [len(b) for b in batches_partial] == [2, 2, 1]
+
+
+def test_percentile_helper_does_not_create_temp_databases() -> None:
+    """Verify candguard.audit._percentile does not create or leak temporary SQLite databases."""
+    from candguard.audit import _percentile
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE source_candidate_counts (left_id TEXT NOT NULL, candidate_count INTEGER NOT NULL)")
+        conn.executemany(
+            "INSERT INTO source_candidate_counts (left_id, candidate_count) VALUES (?, ?)",
+            [(f"src_{i}", i) for i in range(1, 6)],
+        )
+
+        temp_dir = Path(tempfile.gettempdir())
+        before_temp_files = set(temp_dir.glob("candguard-*.sqlite3"))
+
+        p50 = _percentile(conn, 5, 0.50)
+        p95 = _percentile(conn, 5, 0.95)
+        p99 = _percentile(conn, 5, 0.99)
+        p0 = _percentile(conn, 0, 0.50)
+
+        assert p50 == 3
+        assert p95 == 5
+        assert p99 == 5
+        assert p0 == 0
+
+        after_temp_files = set(temp_dir.glob("candguard-*.sqlite3"))
+        new_temp_files = after_temp_files - before_temp_files
+        assert not new_temp_files, f"Calling _percentile leaked temporary database files: {new_temp_files}"
+
+        cursor = conn.execute("SELECT COUNT(*) FROM source_candidate_counts")
+        assert cursor.fetchone()[0] == 5
+    finally:
+        conn.close()
 
 
 def test_parquet_reader_dispatch_raises_informative_error(tmp_path: Path) -> None:

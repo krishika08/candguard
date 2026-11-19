@@ -14,7 +14,7 @@ from .metrics import compute_possible_pairs, compute_reduction_ratio
 from .models import AuditError, validate_audit_arguments
 from .readers import CandidateReader, DelimitedReader, get_reader, resolve_delimiter
 from .reporting import render_text, report_json
-from .storage import SQLiteStorageEngine
+from .storage import SQLiteStorageEngine, compute_nearest_rank_percentile
 
 __all__ = [
     "AuditError",
@@ -68,10 +68,7 @@ def _load_pairs(
 
 
 def _percentile(conn: sqlite3.Connection, total_sources: int, percentile: float) -> int:
-    engine = SQLiteStorageEngine()
-    engine._conn = conn
-    engine._owns_db = False
-    return engine._percentile(total_sources, percentile)
+    return compute_nearest_rank_percentile(conn, total_sources, percentile)
 
 
 def audit_candidates(
