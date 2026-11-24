@@ -84,6 +84,19 @@ def main(argv: list[str] | None = None) -> int:
                     f"--candidate-set-out ({args.candidate_set_out}) and --output ({args.output}) "
                     "must be different files."
                 )
+            if args.output:
+                # Checked before any input is read so --output can never overwrite an input or
+                # another output of this audit.
+                for flag, other_path in (
+                    ("--candidates", args.candidates),
+                    ("--truth", args.truth),
+                    ("--missed-pairs-out", args.missed_pairs_out),
+                ):
+                    if other_path and same_path(args.output, other_path):
+                        raise AuditError(
+                            f"--output ({args.output}) resolves to the same file as {flag} ({other_path}); "
+                            f"--output must point to a different file so {flag} is not overwritten."
+                        )
             report = audit_candidates(
                 candidates_path=args.candidates,
                 left_id=args.left_id,
