@@ -417,3 +417,228 @@ def test_compare_end_to_end_audits(tmp_path: Path) -> None:
     assert len(res["quality_gate"]["failures"]) == 2
     assert res["metrics"]["recall_drop"] == pytest.approx(1 / 3)
     assert res["metrics"]["candidate_pair_growth"] == pytest.approx(1.0)
+
+
+# --- Malformed ground-truth validation ------------------------------------------------------
+
+def _pair_files(tmp_path: Path, base: dict[str, Any], curr: dict[str, Any]) -> tuple[Path, Path]:
+    return _write_json(tmp_path / "base.json", base), _write_json(tmp_path / "curr.json", curr)
+
+
+def _with_truth(report: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    report["ground_truth"].update(fields)
+    return report
+
+
+def test_out_of_range_current_recall_no_longer_passes_recall_gate(tmp_path: Path) -> None:
+    # Before the fix, recall 1.2 produced recall_drop = max(0, 0.9 - 1.2) = 0 and PASSED the gate.
+    b_f, c_f = _pair_files(tmp_path, _valid_report(candidate_recall=0.9), _valid_report(candidate_recall=1.2))
+    with pytest.raises(AuditError, match=r"Invalid 'ground_truth.candidate_recall' in Current report .* got 1\.2"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.01)
+
+
+@pytest.mark.parametrize("bad_truth", ["sha256:abc", [0.9], 0.9, 5, True, False])
+@pytest.mark.parametrize("side", ["Baseline", "Current"])
+@pytest.mark.parametrize("gate", [None, 0.05])
+def test_ground_truth_must_be_object_or_null(tmp_path: Path, bad_truth: Any, side: str, gate: float | None) -> None:
+    bad = _valid_report()
+    bad["ground_truth"] = bad_truth
+    good = _valid_report()
+    b_f, c_f = _pair_files(tmp_path, bad if side == "Baseline" else good, good if side == "Baseline" else bad)
+    with pytest.raises(AuditError, match=rf"Invalid 'ground_truth' in {side} report .* expected an object or null"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
+
+
+@pytest.mark.parametrize(
+    "bad_recall",
+    [-0.1, 1.01, 1.2, -1, 2, float("nan"), float("inf"), float("-inf"), "0.9", "", True, False, [0.9], {"v": 0.9}],
+)
+@pytest.mark.parametrize("side", ["Baseline", "Current"])
+@pytest.mark.parametrize("gate", [None, 0.05])
+def test_invalid_candidate_recall_rejected(tmp_path: Path, bad_recall: Any, side: str, gate: float | None) -> None:
+    bad = _valid_report(candidate_recall=0.85)
+    bad["ground_truth"]["candidate_recall"] = bad_recall
+    good = _valid_report(candidate_recall=0.85)
+    b_f, c_f = _pair_files(tmp_path, bad if side == "Baseline" else good, good if side == "Baseline" else bad)
+    with pytest.raises(AuditError, match=rf"Invalid 'ground_truth.candidate_recall' in {side} report .* between 0 and 1"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
+
+
+HUGE_INT = 10**400  # a valid JSON number that math.isfinite() cannot convert to float
+
+
+@pytest.mark.parametrize("huge", [HUGE_INT, -HUGE_INT], ids=["10**400", "-10**400"])
+@pytest.mark.parametrize("side", ["Baseline", "Current"])
+@pytest.mark.parametrize("gate", [None, 0.05])
+def test_huge_integer_recall_rejected_without_overflow(tmp_path: Path, huge: int, side: str, gate: float | None) -> None:
+    bad = _with_truth(_valid_report(), candidate_recall=huge)
+    good = _valid_report()
+    b_f, c_f = _pair_files(tmp_path, bad if side == "Baseline" else good, good if side == "Baseline" else bad)
+    # JSON round trip: the report on disk yields the same arbitrary-precision int via json.loads().
+    loaded = json.loads((b_f if side == "Baseline" else c_f).read_text(encoding="utf-8"))
+    assert type(loaded["ground_truth"]["candidate_recall"]) is int
+    assert loaded["ground_truth"]["candidate_recall"] == huge
+    with pytest.raises(AuditError, match=rf"Invalid 'ground_truth.candidate_recall' in {side} report .* between 0 and 1"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
+
+
+def test_huge_integer_recall_in_both_reports_rejected(tmp_path: Path) -> None:
+    b_f, c_f = _pair_files(
+        tmp_path, _with_truth(_valid_report(), candidate_recall=HUGE_INT),
+        _with_truth(_valid_report(), candidate_recall=HUGE_INT),
+    )
+    with pytest.raises(AuditError, match=r"Invalid 'ground_truth.candidate_recall' in Baseline report"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+
+
+def test_integer_literal_beyond_int_conversion_limit_is_clean_error(tmp_path: Path) -> None:
+    # 5,001 digits: Python 3.11+ json.loads() raises a plain ValueError (int-string conversion
+    # limit); Python 3.10 parses it and recall validation rejects it. Both must be AuditError.
+    text = json.dumps(_valid_report(candidate_recall=0.85)).replace(
+        '"candidate_recall": 0.85', '"candidate_recall": 1' + "0" * 5000
+    )
+    assert '"candidate_recall": 1000' in text
+    c_f = tmp_path / "curr.json"
+    c_f.write_text(text, encoding="utf-8")
+    b_f = _write_json(tmp_path / "base.json", _valid_report())
+    with pytest.raises(AuditError, match=r"Could not parse Current JSON report|Invalid 'ground_truth.candidate_recall' in Current report"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+
+
+@pytest.mark.parametrize("edge", [0, 1, 0.0, 1.0])
+def test_boundary_recall_values_are_valid(tmp_path: Path, edge: float) -> None:
+    b_f, c_f = _pair_files(
+        tmp_path, _valid_report(candidate_recall=0.85), _with_truth(_valid_report(), candidate_recall=edge)
+    )
+    res = compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=1.0)
+    assert res["quality_gate"]["passed"] is True
+    assert res["current"]["candidate_recall"] == edge
+    assert res["metrics"]["recall_drop"] == pytest.approx(max(0.0, 0.85 - edge))
+
+
+@pytest.mark.parametrize("missing", ["absent", "null"])
+def test_legacy_reports_without_recall_still_compare(tmp_path: Path, missing: str) -> None:
+    legacy = _valid_report()
+    if missing == "absent":
+        del legacy["ground_truth"]["candidate_recall"]
+    else:
+        legacy["ground_truth"]["candidate_recall"] = None
+    b_f, c_f = _pair_files(tmp_path, legacy, _valid_report())
+    res = compare_reports(baseline_path=b_f, current_path=c_f, max_pair_growth=0.5)
+    assert res["quality_gate"]["passed"] is True
+    assert res["metrics"]["recall_drop"] is None
+    assert res["baseline"]["candidate_recall"] is None
+    # Requesting a recall gate keeps the existing, explicit error.
+    with pytest.raises(AuditError, match="baseline report has no candidate recall"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+
+
+def test_reports_without_ground_truth_still_compare_without_recall_gate(tmp_path: Path) -> None:
+    no_truth = _valid_report(candidate_recall=None, fingerprint=None)
+    assert no_truth["ground_truth"] is None
+    b_f, c_f = _pair_files(tmp_path, no_truth, _valid_report(candidate_recall=None, fingerprint=None))
+    res = compare_reports(baseline_path=b_f, current_path=c_f, max_pair_growth=0.1)
+    assert res["quality_gate"]["passed"] is True
+    assert res["baseline"]["ground_truth_fingerprint"] is None
+
+
+def test_legacy_report_without_fingerprint_version_still_valid(tmp_path: Path) -> None:
+    legacy = _valid_report(fingerprint="sha256:same", fingerprint_version="v1")
+    del legacy["ground_truth"]["fingerprint_version"]
+    other = _valid_report(fingerprint="sha256:same", fingerprint_version="v1")
+    b_f, c_f = _pair_files(tmp_path, legacy, other)
+    res = compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+    assert res["quality_gate"]["passed"] is True
+    assert res["baseline"]["ground_truth_fingerprint_version"] == "v1"
+
+
+def test_null_fingerprint_is_still_treated_as_missing(tmp_path: Path) -> None:
+    b_f, c_f = _pair_files(tmp_path, _valid_report(fingerprint=None), _valid_report(fingerprint="sha256:2"))
+    assert compare_reports(baseline_path=b_f, current_path=c_f)["quality_gate"]["passed"] is True
+    with pytest.raises(AuditError, match="baseline report lacks ground-truth fingerprint"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+
+
+@pytest.mark.parametrize("bad_fp", ["", 123, 1.5, True, ["sha256:x"], {"sha256": "x"}])
+@pytest.mark.parametrize("gate", [None, 0.05])
+def test_invalid_fingerprint_type_rejected(tmp_path: Path, bad_fp: Any, gate: float | None) -> None:
+    bad = _with_truth(_valid_report(), fingerprint=bad_fp)
+    b_f, c_f = _pair_files(tmp_path, _valid_report(), bad)
+    with pytest.raises(AuditError, match=r"Invalid 'ground_truth.fingerprint' in Current report .* non-empty string"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
+
+
+@pytest.mark.parametrize("bad_version", [None, "", 2, 2.0, True, ["v2"]])
+@pytest.mark.parametrize("gate", [None, 0.05])
+def test_invalid_fingerprint_version_type_rejected(tmp_path: Path, bad_version: Any, gate: float | None) -> None:
+    bad = _with_truth(_valid_report(), fingerprint_version=bad_version)
+    b_f, c_f = _pair_files(tmp_path, bad, _valid_report())
+    with pytest.raises(AuditError, match=r"Invalid 'ground_truth.fingerprint_version' in Baseline report .* non-empty string"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
+
+
+def test_valid_recall_gate_and_exact_threshold_unchanged(tmp_path: Path) -> None:
+    b_f, c_f = _pair_files(tmp_path, _valid_report(candidate_recall=0.9), _valid_report(candidate_recall=0.85))
+    exact = compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+    assert exact["quality_gate"]["passed"] is True
+    assert exact["metrics"]["recall_drop"] == pytest.approx(0.05)
+    below = compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.0499)
+    assert below["quality_gate"]["passed"] is False
+    assert below["quality_gate"]["failures"][0].startswith("candidate recall drop 0.0500")
+
+
+MALFORMED_TRUTH_CASES = {
+    "truth-string": lambda r: r.update(ground_truth="oops"),
+    "truth-list": lambda r: r.update(ground_truth=[1, 2]),
+    "recall-high": lambda r: r["ground_truth"].update(candidate_recall=1.2),
+    "recall-nan": lambda r: r["ground_truth"].update(candidate_recall=float("nan")),
+    "recall-string": lambda r: r["ground_truth"].update(candidate_recall="0.9"),
+    "recall-bool": lambda r: r["ground_truth"].update(candidate_recall=True),
+    "fingerprint-int": lambda r: r["ground_truth"].update(fingerprint=7),
+    "version-null": lambda r: r["ground_truth"].update(fingerprint_version=None),
+    "recall-huge-int": lambda r: r["ground_truth"].update(candidate_recall=HUGE_INT),
+}
+
+
+@pytest.mark.parametrize("case", list(MALFORMED_TRUTH_CASES))
+@pytest.mark.parametrize("gate", [[], ["--max-recall-drop", "0.05"]])
+def test_cli_malformed_report_exits_2_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], case: str, gate: list[str]
+) -> None:
+    from candguard.cli import main
+
+    bad = _valid_report()
+    MALFORMED_TRUTH_CASES[case](bad)
+    b_f, c_f = _pair_files(tmp_path, _valid_report(), bad)
+    code = main(["compare", "--baseline", str(b_f), "--current", str(c_f), *gate])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.err.startswith("candguard: error: Invalid 'ground_truth")
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize(
+    ("bad_recall", "expected"),
+    [(float("inf"), "got inf"), (HUGE_INT, "got 1000000000"), (-HUGE_INT, "got -1000000000")],
+    ids=["infinity", "huge-int", "huge-negative-int"],
+)
+def test_cli_subprocess_malformed_report_has_no_traceback(tmp_path: Path, bad_recall: Any, expected: str) -> None:
+    import os
+    import subprocess
+    import sys
+
+    bad = _with_truth(_valid_report(), candidate_recall=bad_recall)
+    b_f, c_f = _pair_files(tmp_path, _valid_report(), bad)
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    proc = subprocess.run(
+        [sys.executable, "-m", "candguard", "compare", "--baseline", str(b_f), "--current", str(c_f),
+         "--max-recall-drop", "0.01"],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 2
+    assert "Traceback" not in proc.stderr
+    assert "OverflowError" not in proc.stderr
+    assert "Invalid 'ground_truth.candidate_recall' in Current report" in proc.stderr
+    assert expected in proc.stderr
