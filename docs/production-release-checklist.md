@@ -169,9 +169,64 @@ These checks are local preparation only. The release workflow builds its own dis
 
 Investigate and fix the cause before trying another release. Never upload distributions manually.
 
-- **Nothing was published** (`publish-to-pypi` was skipped or failed before uploading):
-  1. Read the failing job's log. For `validate-version`, compare the tag with both version declarations.
-  2. If the failure was transient (for example a runner or network problem) and the code is correct, re-run the failed jobs: `gh run rerun <run-id> --failed`.
-  3. If a code, version or configuration change is needed, fix it through a normal reviewed PR into `main`. Then delete the tag (`git push --delete origin v0.2.0` and `git tag -d v0.2.0`) and create it again on the corrected commit (section 4). This is safe only because nothing was uploaded under that version.
-- **The upload to PyPI succeeded, but a later problem is found:** a version and its files cannot be re-uploaded or replaced on PyPI. Do not reuse that version number, and do not delete and recreate its tag. Fix the problem in a PR, bump to the next patch version (for example `0.2.1`), and release that. If the published version is harmful, consider yanking it on PyPI.
-- **Trusted Publishing errors in `publish-to-pypi`:** re-check section 2 (owner, repository, workflow file name and environment name) before re-running.
+### 7.1 A failed publish job does not mean nothing was published
+
+PyPI publication can **partially succeed**. `publish-to-pypi` uploads the wheel and the source distribution one at a time, so a job can fail after one file is already on PyPI. For example, the wheel uploads and then the sdist upload fails. PyPI never allows a file name to be uploaded twice, even after the file is deleted, so a version with any uploaded file can never be completed or replaced.
+
+So a red or failed `publish-to-pypi` job must **not** be read as "nothing was published". Before deleting or recreating any release tag, and before re-running `publish-to-pypi`, check what PyPI actually has for the target version. Re-running the publish job is itself an upload attempt, and after a partial upload it could add the missing file under a version that is already consumed.
+
+### 7.2 Check the target version on PyPI
+
+Use the version being released, here `0.2.0`:
+
+```bash
+# 404 = PyPI has no release for this version; 200 = the version exists
+curl -s -o /dev/null -w "%{http_code}\n" https://pypi.org/pypi/candguard/0.2.0/json
+
+# If 200: list every file published for the version (yanked files are listed too)
+curl -s https://pypi.org/pypi/candguard/0.2.0/json \
+  | python -c "import json, sys; [print(f['packagetype'], f['filename'], 'yanked' if f['yanked'] else '') for f in json.load(sys.stdin)['urls']]"
+```
+
+`bdist_wheel` is the wheel (`candguard-0.2.0-py3-none-any.whl`), and `sdist` is the source distribution (`candguard-0.2.0.tar.gz`). Also check the files listed at <https://pypi.org/project/candguard/0.2.0/#files>, and read the `publish-to-pypi` log for upload lines for either file.
+
+**Treat the result as uncertain when the sources disagree, or when you cannot rule out an upload.** For example:
+- the JSON API returns 404 but the job log shows an upload in progress or completed;
+- a file was deleted from PyPI (deleted files no longer appear, but their names still cannot be reused);
+- PyPI is returning errors.
+
+The JSON API can lag briefly after an upload, so recheck after a few minutes before relying on a 404.
+
+### 7.3 Decide using this table
+
+| PyPI state for the target version | Allowed action |
+|:--|:--|
+| Neither distribution exists (confirmed: JSON API 404, no files listed, no upload in the job log) | Correct the problem. Tag recovery may be considered (section 7.4). |
+| Only the wheel exists | The version is consumed: use a new version (section 7.5). |
+| Only the sdist exists | The version is consumed: use a new version (section 7.5). |
+| Both exist | Publication succeeded. Do the post-publication verification (section 6). |
+| Status uncertain | Stop and investigate. Do not delete tags, re-run `publish-to-pypi` or bump the version until the state is known. |
+
+If **either** the wheel or the sdist exists for a version, that version is consumed. Never attempt to upload the missing file, whether with `twine upload`, by re-running `publish-to-pypi`, or by pushing the same tag again. Never reuse the version number.
+
+### 7.4 Tag recovery (only when neither distribution was uploaded)
+
+Delete and recreate a release tag **only** after section 7.2 has confirmed that neither the wheel nor the sdist was uploaded for that version.
+
+1. Read the failing job's log. For `validate-version`, compare the tag with both version declarations.
+2. If the failure was transient (for example a runner or network problem) in a job **before** `publish-to-pypi`, and the code is correct, re-run the failed jobs: `gh run rerun <run-id> --failed`. If `publish-to-pypi` itself failed, re-run it only after section 7.2 confirms that no file was uploaded.
+3. If a code, version or configuration change is needed, fix it through a normal reviewed PR into `main`. Then delete the tag (`git push --delete origin v0.2.0` and `git tag -d v0.2.0`) and create it again on the corrected commit (section 4).
+
+### 7.5 A consumed version: release a new patch version
+
+When any file exists for the version (wheel only, sdist only, or both with a later problem found):
+
+1. Do not delete or recreate the version's tag, do not re-run `publish-to-pypi` for it, and do not upload the missing file.
+2. Fix the underlying problem through a normal reviewed PR into `main`.
+3. Prepare the next patch version, for example `0.2.1`, through a **separate, explicitly approved version-bump PR**. It updates both `pyproject.toml` (`[project].version`) and `src/candguard/__init__.py` (`__version__`), exactly as in section 1. Move the `CHANGELOG.md` entries to the new version.
+4. Release the new version with a new tag (`v0.2.1`) through section 4. The workflow's `validate-version` job requires the tag and both declarations to match.
+5. If the consumed version is incomplete, for example only the wheel was uploaded, or it is harmful, consider yanking it on PyPI so installers skip it by default. Yanking does not make the version reusable.
+
+### 7.6 Trusted Publishing errors
+
+If `publish-to-pypi` fails with a Trusted Publishing or OIDC error, re-check section 2 (owner, repository, workflow file name and environment name). Then still run the section 7.2 check before re-running the job or touching the tag.
