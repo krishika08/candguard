@@ -337,3 +337,162 @@ def test_cli_compare_separate_output_still_written(tmp_path: Path, with_sets: bo
     assert ("candidate_set_drift" in data["metrics"]) is with_sets
     assert _snapshot(paths) == before
 
+
+# --- audit --output must never resolve to an input or another audit output ------------------
+
+def _audit_files(tmp_path: Path) -> dict[str, Path]:
+    files = {
+        "candidates": tmp_path / "candidates.tsv",
+        "truth": tmp_path / "truth.tsv",
+        "missed": tmp_path / "missed.tsv",
+        "cset": tmp_path / "candidates.pairs.tsv",
+    }
+    files["candidates"].write_text("s\tc\na\tb\na\tc\nd\te\n", encoding="utf-8")
+    files["truth"].write_text("s\tc\na\tb\nx\ty\n", encoding="utf-8")
+    files["missed"].write_text("previous missed-pairs artifact\n", encoding="utf-8")
+    files["cset"].write_text("previous candidate-set artifact\n", encoding="utf-8")
+    return files
+
+
+def _audit_cli_args(
+    files: dict[str, Path], output: Path | str, *, truth: bool = True, candidate_set: bool = False
+) -> list[str]:
+    args = ["audit", "--candidates", str(files["candidates"]), "--left-id", "s", "--right-id", "c"]
+    if truth:
+        args += ["--truth", str(files["truth"]), "--missed-pairs-out", str(files["missed"])]
+    if candidate_set:
+        args += ["--candidate-set-out", str(files["cset"])]
+    return args + ["--format", "json", "--output", str(output)]
+
+
+def _tree_snapshot(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _assert_audit_rejected(
+    tmp_path: Path,
+    args: list[str],
+    expected_err: list[str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import candguard.cli as cli_module
+
+    def must_not_run(**kwargs: object) -> dict[str, object]:
+        raise AssertionError("audit_candidates() must not run when --output collides with another path")
+
+    monkeypatch.setattr(cli_module, "audit_candidates", must_not_run)
+    before = _tree_snapshot(tmp_path)
+    capsys.readouterr()
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    for fragment in expected_err:
+        assert fragment in captured.err
+    assert captured.out == ""  # no report rendered
+    assert _tree_snapshot(tmp_path) == before  # no file overwritten, truncated or created
+
+
+@pytest.mark.parametrize(
+    ("key", "flag"),
+    [("candidates", "--candidates"), ("truth", "--truth"), ("missed", "--missed-pairs-out")],
+)
+def test_cli_audit_output_cannot_overwrite_input_or_missed_pairs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, key: str, flag: str
+) -> None:
+    files = _audit_files(tmp_path)
+    _assert_audit_rejected(
+        tmp_path,
+        _audit_cli_args(files, files[key]),
+        [f"--output ({files[key]}) resolves to the same file as {flag} (",
+         f"--output must point to a different file so {flag} is not overwritten"],
+        capsys,
+        monkeypatch,
+    )
+
+
+def test_cli_audit_output_cannot_equal_candidate_set_out(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _audit_files(tmp_path)
+    _assert_audit_rejected(
+        tmp_path,
+        _audit_cli_args(files, files["cset"], candidate_set=True),
+        ["--candidate-set-out (", "and --output (", "must be different files"],
+        capsys,
+        monkeypatch,
+    )
+
+
+def test_cli_audit_output_relative_alias_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _audit_files(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _assert_audit_rejected(
+        tmp_path, _audit_cli_args(files, Path(".") / "candidates.tsv"),
+        ["resolves to the same file as --candidates ("], capsys, monkeypatch,
+    )
+
+
+def test_cli_audit_output_dotdot_alias_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _audit_files(tmp_path)
+    (tmp_path / "sub").mkdir()
+    _assert_audit_rejected(
+        tmp_path, _audit_cli_args(files, tmp_path / "sub" / ".." / "truth.tsv"),
+        ["resolves to the same file as --truth ("], capsys, monkeypatch,
+    )
+
+
+def test_cli_audit_output_symlink_alias_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _audit_files(tmp_path)
+    link = tmp_path / "report.json"
+    try:
+        link.symlink_to(files["candidates"])
+    except (OSError, NotImplementedError) as exc:  # e.g. Windows without symlink privilege
+        pytest.skip(f"symlink creation not supported here: {exc}")
+    _assert_audit_rejected(
+        tmp_path, _audit_cli_args(files, link),
+        ["resolves to the same file as --candidates ("], capsys, monkeypatch,
+    )
+    assert link.is_symlink()
+
+
+def test_cli_audit_separate_output_text_report(tmp_path: Path) -> None:
+    files = _audit_files(tmp_path)
+    out = tmp_path / "reports" / "audit.txt"
+    inputs = {k: files[k].read_bytes() for k in ("candidates", "truth")}
+    code = main(["audit", "--candidates", str(files["candidates"]), "--left-id", "s", "--right-id", "c",
+                 "--output", str(out)])
+    assert code == 0
+    assert "Quality gate: PASS" in out.read_text(encoding="utf-8")
+    assert {k: files[k].read_bytes() for k in ("candidates", "truth")} == inputs
+
+
+def test_cli_audit_separate_output_without_truth(tmp_path: Path) -> None:
+    files = _audit_files(tmp_path)
+    out = tmp_path / "audit.json"
+    before = files["candidates"].read_bytes()
+    assert main(_audit_cli_args(files, out, truth=False)) == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["ground_truth"] is None
+    assert data["inputs"]["unique_candidate_pairs"] == 3
+    assert files["candidates"].read_bytes() == before
+
+
+def test_cli_audit_separate_output_with_truth_missed_pairs_and_candidate_set(tmp_path: Path) -> None:
+    files = _audit_files(tmp_path)
+    out = tmp_path / "audit.json"
+    inputs = {k: files[k].read_bytes() for k in ("candidates", "truth")}
+    assert main(_audit_cli_args(files, out, candidate_set=True)) == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["ground_truth"]["missed_pairs"] == 1
+    assert data["ground_truth"]["missed_pairs_file"] == str(files["missed"])
+    assert data["candidate_set"]["unique_pairs"] == 3
+    assert files["missed"].read_text(encoding="utf-8") == "s\tc\nx\ty\n"
+    assert files["cset"].read_text(encoding="utf-8").startswith("left_id\tright_id\n")
+    assert {k: files[k].read_bytes() for k in ("candidates", "truth")} == inputs
+
