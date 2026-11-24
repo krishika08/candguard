@@ -5,37 +5,268 @@ name: publish
     tags:
       - "v*"
 
+# Read-only by default. Only the publish job is granted id-token: write (for OIDC).
 permissions:
   contents: read
 
+# Never run two publications for the same tag at once.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  build-and-test:
-    name: Build and test distributions
+  validate-version:
+    name: Validate tag and package version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
     steps:
       - name: Check out repository source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Install package and test dependencies
+      - name: Require tag == pyproject.toml version == candguard.__version__
+        id: check
+        # The tag is read from GITHUB_REF_NAME inside Python (never interpolated into the
+        # script) and validated against a strict pattern before it is used anywhere.
+        run: |
+          python - <<'PY'
+          import ast
+          import os
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+
+          def fail(title: str, message: str) -> None:
+              print(f"::error title={title}::{message}")
+              sys.exit(1)
+
+
+          ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          if ref_type != "tag":
+              fail("Not a tag", f"Publishing requires a tag push; got ref type {ref_type!r} ({tag!r}).")
+
+          match = re.fullmatch(r"v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))", tag)
+          if match is None:
+              fail(
+                  "Malformed release tag",
+                  f"Tag {tag!r} is not a stable release tag. Expected vMAJOR.MINOR.PATCH, "
+                  "for example v1.2.3 (no leading zeros, pre-release or build suffixes).",
+              )
+          tag_version = match.group(1)
+
+          with open("pyproject.toml", "rb") as stream:
+              pyproject_version = tomllib.load(stream).get("project", {}).get("version")
+
+          init_path = Path("src/candguard/__init__.py")
+          module_version = None
+          for node in ast.parse(init_path.read_text(encoding="utf-8")).body:
+              if (
+                  isinstance(node, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets)
+                  and isinstance(node.value, ast.Constant)
+                  and isinstance(node.value.value, str)
+              ):
+                  module_version = node.value.value
+
+          print(f"Tag:                         {tag} -> {tag_version}")
+          print(f"pyproject.toml version:      {pyproject_version!r}")
+          print(f"candguard.__version__:       {module_version!r}")
+          if pyproject_version is None:
+              fail("Version not found", "pyproject.toml has no [project] version.")
+          if module_version is None:
+              fail("Version not found", f"{init_path} has no literal __version__ = '...' assignment.")
+          if not (tag_version == pyproject_version == module_version):
+              fail(
+                  "Version mismatch",
+                  f"Tag {tag} declares {tag_version}, pyproject.toml declares {pyproject_version}, "
+                  f"and src/candguard/__init__.py declares {module_version}. All three must match exactly.",
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={tag_version}\n")
+          print(f"Release version {tag_version} is consistent.")
+          PY
+
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.python-version }})
+    needs: [validate-version]
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Verify default install has no optional dependencies
+        run: |
+          python -c "import importlib.util, sys; sys.exit('pyarrow must not be installed by the default install' if importlib.util.find_spec('pyarrow') else 0)"
+      - run: pytest --cov=candguard
+
+  test-parquet:
+    name: optional parquet (${{ matrix.os }}, py${{ matrix.python-version }})
+    needs: [validate-version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Python 3.10 resolves to PyArrow 25.x (26.x requires Python >= 3.11).
+          - os: ubuntu-latest
+            python-version: "3.10"
+            expected-pyarrow-major: "25"
+          - os: ubuntu-latest
+            python-version: "3.13"
+            expected-pyarrow-major: ""
+          - os: windows-latest
+            python-version: "3.12"
+            expected-pyarrow-major: ""
+          - os: macos-latest
+            python-version: "3.12"
+            expected-pyarrow-major: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev,parquet]"
+      - name: Report resolved PyArrow version
+        env:
+          EXPECTED_MAJOR: ${{ matrix.expected-pyarrow-major }}
+        run: |
+          python - <<'PY'
+          import os, sys, pyarrow
+          major = int(pyarrow.__version__.split(".")[0])
+          print(f"Python {sys.version.split()[0]} resolved pyarrow {pyarrow.__version__}")
+          expected = os.environ.get("EXPECTED_MAJOR")
+          if major < 25 or (expected and major != int(expected)):
+              sys.exit(f"unexpected pyarrow version {pyarrow.__version__} (expected major {expected or '>=25'})")
+          PY
+      - run: pytest --cov=candguard
+
+  cli-smoke:
+    name: Release CLI smoke tests
+    needs: [validate-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Audit, compare and candidate-set drift through the candguard CLI
+        run: |
+          set -euo pipefail
+          expect_exit() {
+            local want=$1; shift
+            local got=0
+            "$@" || got=$?
+            if [ "$got" -ne "$want" ]; then
+              echo "::error title=CLI smoke test::expected exit $want, got $got: $*"
+              exit 1
+            fi
+          }
+          args=(--truth examples/truth.tsv --left-id source_id --right-id candidate_id)
+          mkdir -p smoke
+
+          echo "== audit: basic, recall gate pass/fail, JSON report"
+          candguard audit --candidates examples/candidates.tsv "${args[@]}"
+          candguard audit --candidates examples/candidates.tsv "${args[@]}" --min-recall 0.60
+          expect_exit 1 candguard audit --candidates examples/candidates.tsv "${args[@]}" --min-recall 0.70
+          candguard audit --candidates examples/candidates.tsv "${args[@]}" --format json --output smoke/base.json
+          candguard audit --candidates examples/candidates.tsv "${args[@]}" --format json --output smoke/curr.json
+          python - <<'PY'
+          import json
+          report = json.load(open("smoke/base.json", encoding="utf-8"))
+          assert report["schema_version"] == "1.0", report["schema_version"]
+          assert report["ground_truth"]["candidate_recall"] == 0.66666667, report["ground_truth"]
+          assert report["quality_gate"] == {"passed": True, "failures": []}, report["quality_gate"]
+          PY
+
+          echo "== compare: gates pass on identical runs, recall-drop and pair-growth gates fail on regressions"
+          candguard compare --baseline smoke/base.json --current smoke/curr.json --max-recall-drop 0.01 --max-pair-growth 0.05
+          grep -v -x "$(printf 'A2\tB3')" examples/candidates.tsv > smoke/regressed.tsv
+          candguard audit --candidates smoke/regressed.tsv "${args[@]}" --format json --output smoke/regressed.json
+          expect_exit 1 candguard compare --baseline smoke/base.json --current smoke/regressed.json --max-recall-drop 0.01
+          { cat examples/candidates.tsv; printf 'A9\tB9\nA9\tB9\n'; } > smoke/grown.tsv
+          candguard audit --candidates smoke/grown.tsv "${args[@]}" --format json --output smoke/grown.json
+          expect_exit 1 candguard compare --baseline smoke/base.json --current smoke/grown.json --max-pair-growth 0.05
+
+          echo "== candidate-set drift: identical sets pass --min-candidate-jaccard 1.0"
+          for name in base curr; do
+            candguard audit --candidates examples/candidates.tsv "${args[@]}" \
+              --candidate-set-out "smoke/$name.pairs.tsv" --format json --output "smoke/drift-$name.json"
+          done
+          candguard compare --baseline smoke/drift-base.json --current smoke/drift-curr.json \
+            --baseline-candidate-set smoke/base.pairs.tsv --current-candidate-set smoke/curr.pairs.tsv \
+            --min-candidate-jaccard 1.0 --format json --output smoke/drift.json
+          python - <<'PY'
+          import json
+          report = json.load(open("smoke/drift.json", encoding="utf-8"))
+          drift = report["metrics"]["candidate_set_drift"]
+          assert drift["jaccard_similarity"] == 1.0 and drift["retained_pairs"] == 4, drift
+          assert drift["added_pairs"] == 0 and drift["removed_pairs"] == 0, drift
+          assert report["quality_gate"] == {"passed": True, "failures": []}, report["quality_gate"]
+          PY
+          candguard audit --candidates smoke/regressed.tsv "${args[@]}" \
+            --candidate-set-out smoke/regressed.pairs.tsv --format json --output smoke/drift-regressed.json
+          expect_exit 1 candguard compare --baseline smoke/drift-base.json --current smoke/drift-regressed.json \
+            --baseline-candidate-set smoke/base.pairs.tsv --current-candidate-set smoke/regressed.pairs.tsv \
+            --min-candidate-jaccard 1.0
+          echo "All release CLI smoke tests passed."
+
+  build-distributions:
+    name: Build and verify distributions
+    needs: [validate-version, test, test-parquet, cli-smoke]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ needs.validate-version.outputs.version }}
+    steps:
+      - name: Check out repository source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
           pip install build twine
-
-      - name: Run automated test suite
-        run: pytest --cov=candguard
-
-      - name: Run CLI smoke tests
-        run: |
-          candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --min-recall 0.60
-          candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --format json --output base.json
-          candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --format json --output curr.json
-          candguard compare --baseline base.json --current curr.json --max-recall-drop 0.01 --max-pair-growth 0.05
 
       - name: Build wheel and source distribution
         run: python -m build
@@ -43,7 +274,56 @@ jobs:
       - name: Validate distribution metadata
         run: python -m twine check dist/*
 
-      - name: Upload built distributions
+      - name: Verify distribution file names match the release version
+        run: |
+          set -euo pipefail
+          ls -l dist/
+          test -n "$RELEASE_VERSION"
+          test -f "dist/candguard-${RELEASE_VERSION}-py3-none-any.whl"
+          test -f "dist/candguard-${RELEASE_VERSION}.tar.gz"
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+
+      - name: Install the wheel in a clean virtual environment and verify it
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/wheel-venv"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-cache-dir "$GITHUB_WORKSPACE/dist/candguard-${RELEASE_VERSION}-py3-none-any.whl"
+          # Run everything from outside the checkout so nothing can import the source tree.
+          work="$RUNNER_TEMP/wheel-smoke"
+          mkdir -p "$work"
+          cp "$GITHUB_WORKSPACE"/examples/candidates.tsv "$GITHUB_WORKSPACE"/examples/truth.tsv "$work/"
+          cd "$work"
+          "$venv/bin/python" - <<'PY'
+          import importlib.metadata
+          import importlib.util
+          import os
+          import sys
+          from pathlib import Path
+
+          import candguard
+
+          expected = os.environ["RELEASE_VERSION"]
+          dist_version = importlib.metadata.version("candguard")
+          print(f"installed candguard {dist_version} (__version__ {candguard.__version__}) from {candguard.__file__}")
+          assert dist_version == expected, (dist_version, expected)
+          assert candguard.__version__ == expected, (candguard.__version__, expected)
+          assert Path(candguard.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()), candguard.__file__
+          assert importlib.util.find_spec("pyarrow") is None, "the default install must not install pyarrow"
+          requires = importlib.metadata.requires("candguard") or []
+          unconditional = [r for r in requires if "extra ==" not in r]
+          assert not unconditional, f"unexpected default runtime dependencies: {unconditional}"
+          PY
+          version_output="$("$venv/bin/candguard" --version)"
+          echo "$version_output"
+          test "$version_output" = "candguard ${RELEASE_VERSION}"
+          "$venv/bin/candguard" --help
+          "$venv/bin/candguard" audit --candidates candidates.tsv --truth truth.tsv \
+            --left-id source_id --right-id candidate_id --min-recall 0.60 --format json --output audit.json
+          "$venv/bin/python" -c "import json; r = json.load(open('audit.json')); assert r['version'] == '${RELEASE_VERSION}' and r['quality_gate']['passed'], r"
+          echo "Installed wheel verified."
+
+      - name: Upload verified distributions
         uses: actions/upload-artifact@v7
         with:
           name: candguard-dist
@@ -52,7 +332,17 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    needs: [build-and-test]
+    # Depends on every validation job, not only the build: a failed, cancelled or skipped
+    # prerequisite makes this job skip, and the explicit result checks below make that
+    # requirement visible and robust against future edits.
+    needs: [validate-version, test, test-parquet, cli-smoke, build-distributions]
+    if: >-
+      github.ref_type == 'tag'
+      && needs.validate-version.result == 'success'
+      && needs.test.result == 'success'
+      && needs.test-parquet.result == 'success'
+      && needs.cli-smoke.result == 'success'
+      && needs.build-distributions.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: pypi
