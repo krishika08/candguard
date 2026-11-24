@@ -4,8 +4,12 @@ Separates input file reading from the processing and storage engine:
 
 - ``DelimitedReader`` reads CSV/TSV text files using only the standard library.
 - ``ParquetReader`` reads Apache Parquet files through the optional ``pyarrow``
-  dependency (``pip install "candguard[parquet]"``). PyArrow is imported lazily,
-  so importing CandGuard never requires it.
+  dependency. Install it from a source checkout with
+  ``python -m pip install -e ".[parquet]"`` (run from the repository root), or, for a
+  published CandGuard release that includes Parquet support, with
+  ``python -m pip install "candguard[parquet]"``. The published 0.1.0 release does not
+  include Parquet support. PyArrow is imported lazily, so importing CandGuard never
+  requires it.
 """
 from __future__ import annotations
 
@@ -233,7 +237,10 @@ def _identifier_kind(pa: Any, arrow_type: Any) -> str | None:
 class ParquetReader:
     """Reader for Apache Parquet candidate-pair and ground-truth files.
 
-    Requires the optional ``pyarrow`` dependency (``pip install "candguard[parquet]"``).
+    Requires the optional ``pyarrow`` dependency. From a source checkout, install it with
+    ``python -m pip install -e ".[parquet]"`` run from the repository root. From a published
+    CandGuard release that includes Parquet support (CandGuard 0.1.0 does not), use
+    ``python -m pip install "candguard[parquet]"``. See ``PARQUET_INSTALL_HINT``.
 
     Data is read incrementally with ``pyarrow.parquet.ParquetFile.iter_batches()``, projecting
     only the two identifier columns, and yielded in file row order.
