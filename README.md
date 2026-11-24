@@ -48,7 +48,9 @@ To read `.parquet` files from the development source, install the optional extra
 pip install -e ".[parquet]"
 ```
 
-The extra requires `pyarrow>=25.0.1`; on Python 3.10 this resolves to PyArrow 25.x. PyArrow is imported only when a `.parquet` file is read, so CSV/TSV audits never load it. The error shown when PyArrow is missing suggests `pip install "candguard[parquet]"`. That command only works from PyPI once a release containing the extra is published, so from a checkout use the command above.
+Run this from the repository root. It is the correct method for the current development checkout. The `parquet` extra is not available from PyPI yet: `python -m pip install "candguard[parquet]"` only works for a published release that includes Parquet support, and 0.1.0 does not.
+
+The extra requires `pyarrow>=25.0.1`; on Python 3.10 this resolves to PyArrow 25.x. PyArrow is imported only when a `.parquet` file is read, so CSV/TSV audits never load it. If a `.parquet` file is given and PyArrow is missing, CandGuard exits with code 2. Its error message shows both commands, each labeled with the installation it applies to.
 
 ## Quick start
 

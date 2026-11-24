@@ -22,7 +22,15 @@ import pytest
 
 from candguard import AuditError, audit_candidates
 from candguard.cli import main
-from candguard.readers import CandidateReader, DelimitedReader, ParquetReader, get_reader
+from candguard.readers import (
+    PARQUET_INSTALL_HINT,
+    PARQUET_RELEASE_INSTALL_COMMAND,
+    PARQUET_SOURCE_INSTALL_COMMAND,
+    CandidateReader,
+    DelimitedReader,
+    ParquetReader,
+    get_reader,
+)
 
 try:
     import pyarrow as pa
@@ -134,12 +142,35 @@ def test_importing_candguard_does_not_import_pyarrow() -> None:
     assert result.stdout.strip() == "False"
 
 
-def test_csv_audit_works_when_pyarrow_is_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("suffix", "delimiter"), [(".csv", ","), (".tsv", "\t")])
+def test_delimited_audit_works_when_pyarrow_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str, delimiter: str
+) -> None:
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
-    cand = write_delimited(tmp_path / "c.csv", [("a", "b")], ",")
-    report = audit_candidates(candidates_path=cand, left_id="source_id", right_id="candidate_id")
+    cand = write_delimited(tmp_path / f"c{suffix}", [("a", "b")], delimiter)
+    truth = write_delimited(tmp_path / f"t{suffix}", [("a", "b")], delimiter)
+    report = audit_candidates(candidates_path=cand, truth_path=truth, left_id="source_id", right_id="candidate_id")
     assert report["inputs"]["candidate_rows"] == 1
+    assert report["ground_truth"]["candidate_recall"] == 1.0
+
+
+def test_install_hint_labels_release_and_source_checkout_commands() -> None:
+    assert PARQUET_RELEASE_INSTALL_COMMAND == 'python -m pip install "candguard[parquet]"'
+    assert PARQUET_SOURCE_INSTALL_COMMAND == 'python -m pip install -e ".[parquet]"'
+    hint = PARQUET_INSTALL_HINT
+    assert "\n" not in hint  # one line, like every other AuditError message
+    release_part, _, source_part = hint.partition("; from a source checkout")
+    assert source_part, hint
+    # Each command appears, delimited by backticks, only in the part labeled for it.
+    assert f"`{PARQUET_RELEASE_INSTALL_COMMAND}`" in release_part
+    assert f"`{PARQUET_SOURCE_INSTALL_COMMAND}`" in source_part
+    assert PARQUET_SOURCE_INSTALL_COMMAND not in release_part
+    assert PARQUET_RELEASE_INSTALL_COMMAND not in source_part
+    # The release command is limited to releases that include Parquet; 0.1.0 is explicitly excluded.
+    assert "published CandGuard release that includes Parquet support (CandGuard 0.1.0 does not)" in release_part
+    # The editable install must be run from the repository root.
+    assert source_part.endswith(f"`{PARQUET_SOURCE_INSTALL_COMMAND}` from the repository root.")
 
 
 @pytest.mark.parametrize("factory", ["get_reader", "ParquetReader"])
@@ -147,11 +178,18 @@ def test_missing_pyarrow_raises_install_hint(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
     path = tmp_path / "pairs.parquet"
-    with pytest.raises(AuditError, match=r'optional PyArrow dependency.*pip install "candguard\[parquet\]"'):
+    with pytest.raises(AuditError) as excinfo:
         if factory == "get_reader":
             get_reader(path, "l", "r")
         else:
             ParquetReader(path, "l", "r")
+    message = str(excinfo.value)
+    assert message.startswith("Reading Parquet input requires the optional PyArrow dependency")
+    assert message.endswith(PARQUET_INSTALL_HINT)
+    assert PARQUET_RELEASE_INSTALL_COMMAND in message
+    assert PARQUET_SOURCE_INSTALL_COMMAND in message
+    assert "repository root" in message
+    assert isinstance(excinfo.value.__cause__, ImportError)
 
 
 @pytest.mark.parametrize("flag", ["--candidates", "--truth"])
@@ -168,7 +206,32 @@ def test_cli_missing_pyarrow_exits_2(
     if flag == "--truth":
         argv += ["--truth", str(parquet_path)]
     assert main(argv) == 2
-    assert 'pip install "candguard[parquet]"' in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err.startswith("candguard: error: Reading Parquet input requires the optional PyArrow dependency")
+    assert PARQUET_INSTALL_HINT in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+
+
+def test_cli_subprocess_missing_pyarrow_has_no_traceback(tmp_path: Path) -> None:
+    """End-to-end: a real interpreter with PyArrow blocked prints the guidance and exits 2."""
+    parquet_path = tmp_path / "pairs.parquet"
+    parquet_path.write_bytes(b"placeholder")
+    code = (
+        "import sys; sys.modules['pyarrow'] = None; sys.modules['pyarrow.parquet'] = None; "
+        "from candguard.cli import main; "
+        f"sys.exit(main(['audit', '--candidates', {str(parquet_path)!r}, "
+        "'--left-id', 'source_id', '--right-id', 'candidate_id']))"
+    )
+    env = {**os.environ, "PYTHONPATH": str(SRC_ROOT)}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert PARQUET_RELEASE_INSTALL_COMMAND in result.stderr
+    assert PARQUET_SOURCE_INSTALL_COMMAND in result.stderr
+    assert f"`{PARQUET_SOURCE_INSTALL_COMMAND}` from the repository root" in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1  # a single "candguard: error: ..." line
 
 
 def test_get_reader_rejects_delimiter_override_for_parquet(tmp_path: Path) -> None:

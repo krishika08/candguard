@@ -18,7 +18,19 @@ from .models import AuditError
 
 PARQUET_SUFFIXES = frozenset({".parquet"})
 
-PARQUET_INSTALL_HINT = 'pip install "candguard[parquet]"'
+#: Installs the optional extra from PyPI. Only works for a published release that declares the
+#: ``parquet`` extra; the published 0.1.0 release does not.
+PARQUET_RELEASE_INSTALL_COMMAND = 'python -m pip install "candguard[parquet]"'
+#: Installs the optional extra into an editable source checkout; run from the repository root.
+PARQUET_SOURCE_INSTALL_COMMAND = 'python -m pip install -e ".[parquet]"'
+
+# A single line, like every other AuditError message; backticks delimit each command.
+PARQUET_INSTALL_HINT = (
+    "Install it with the command for how CandGuard was installed: "
+    "from a published CandGuard release that includes Parquet support (CandGuard 0.1.0 does not), "
+    f"run `{PARQUET_RELEASE_INSTALL_COMMAND}`; "
+    f"from a source checkout, run `{PARQUET_SOURCE_INSTALL_COMMAND}` from the repository root."
+)
 
 
 def _validate_batch_size(batch_size: Any) -> None:
@@ -199,7 +211,7 @@ def _import_pyarrow_parquet() -> tuple[Any, Any]:
     except ImportError as exc:
         raise AuditError(
             "Reading Parquet input requires the optional PyArrow dependency, which is not installed "
-            f"or could not be imported ({exc}). Install it with: {PARQUET_INSTALL_HINT}"
+            f"or could not be imported ({exc}). {PARQUET_INSTALL_HINT}"
         ) from exc
     return pa, pq
 

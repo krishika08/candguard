@@ -31,6 +31,7 @@ These changes are on the `main` branch and **have not been released**. The lates
 
 ### Improved
 
+- **Optional-dependency installation guidance:** when a `.parquet` input is given and PyArrow is missing, the error (exit code 2) now lists two commands, each labeled with the installation it applies to. `python -m pip install "candguard[parquet]"` is for a published release that includes Parquet support (0.1.0 does not). `python -m pip install -e ".[parquet]"` is for a source checkout and must be run from the repository root. Previously the error recommended only `pip install "candguard[parquet]"`, which does not work with any currently published release. The README and [`docs/parquet-guide.md`](docs/parquet-guide.md) match the new message.
 - **Output-collision protection:** `audit --output` can no longer resolve to the candidates, truth, missed-pairs or candidate-set file, and `compare --output` can no longer resolve to either report or either candidate-set sidecar. Collisions exit with code 2 before any input is read.
 - **Ground-truth validation in compare reports:**
   - `compare` rejects a `ground_truth` section that is not an object or `null`;
