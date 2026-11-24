@@ -104,6 +104,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             rendered = report_json(report) if args.format == "json" else render_text(report)
         elif args.command == "compare":
+            if args.output:
+                # Checked before any input is read so --output can never overwrite an input.
+                for flag, input_path in (
+                    ("--baseline", args.baseline),
+                    ("--current", args.current),
+                    ("--baseline-candidate-set", args.baseline_candidate_set),
+                    ("--current-candidate-set", args.current_candidate_set),
+                ):
+                    if input_path and same_path(args.output, input_path):
+                        raise AuditError(
+                            f"--output ({args.output}) resolves to the same file as {flag} ({input_path}); "
+                            "--output must point to a different file so the input is not overwritten."
+                        )
             report = compare_reports(
                 baseline_path=args.baseline,
                 current_path=args.current,

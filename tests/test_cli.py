@@ -227,3 +227,113 @@ def test_cli_compare_json_format_and_output(tmp_path: Path) -> None:
     assert data["command"] == "compare"
     assert data["quality_gate"]["passed"] is True
 
+
+# --- compare --output must never resolve to an input file -----------------------------------
+
+def _drift_inputs(tmp_path: Path) -> dict[str, Path]:
+    """Create two audit reports with candidate-set sidecars via the CLI."""
+    paths: dict[str, Path] = {}
+    for name, rows in (("baseline", "a\tb\na\tc\n"), ("current", "a\tb\nd\te\n")):
+        candidates = tmp_path / f"{name}_candidates.tsv"
+        candidates.write_text("s\tc\n" + rows, encoding="utf-8")
+        paths[name] = tmp_path / f"{name}.json"
+        paths[f"{name}_set"] = tmp_path / f"{name}.pairs.tsv"
+        assert main([
+            "audit", "--candidates", str(candidates), "--left-id", "s", "--right-id", "c",
+            "--candidate-set-out", str(paths[f"{name}_set"]), "--format", "json", "--output", str(paths[name]),
+        ]) == 0
+    return paths
+
+
+def _compare_args(paths: dict[str, Path], output: Path | str, *, with_sets: bool = True) -> list[str]:
+    args = ["compare", "--baseline", str(paths["baseline"]), "--current", str(paths["current"])]
+    if with_sets:
+        args += ["--baseline-candidate-set", str(paths["baseline_set"]),
+                 "--current-candidate-set", str(paths["current_set"])]
+    return args + ["--format", "json", "--output", str(output)]
+
+
+def _snapshot(paths: dict[str, Path]) -> dict[str, bytes]:
+    return {name: path.read_bytes() for name, path in paths.items()}
+
+
+def _assert_rejected(
+    paths: dict[str, Path],
+    output: Path | str,
+    flag: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import candguard.cli as cli_module
+
+    def must_not_run(**kwargs: object) -> dict[str, object]:
+        raise AssertionError("compare_reports() must not run when --output collides with an input")
+
+    monkeypatch.setattr(cli_module, "compare_reports", must_not_run)
+    before = _snapshot(paths)
+    capsys.readouterr()
+    assert main(_compare_args(paths, output)) == 2
+    captured = capsys.readouterr()
+    assert f"resolves to the same file as {flag} (" in captured.err
+    assert "--output must point to a different file" in captured.err
+    assert captured.out == ""  # no report was rendered or written anywhere
+    assert _snapshot(paths) == before  # every input is byte-for-byte unchanged
+
+
+@pytest.mark.parametrize(
+    ("key", "flag"),
+    [
+        ("baseline", "--baseline"),
+        ("current", "--current"),
+        ("baseline_set", "--baseline-candidate-set"),
+        ("current_set", "--current-candidate-set"),
+    ],
+)
+def test_cli_compare_output_cannot_overwrite_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, key: str, flag: str
+) -> None:
+    paths = _drift_inputs(tmp_path)
+    _assert_rejected(paths, paths[key], flag, capsys, monkeypatch)
+
+
+def test_cli_compare_output_dotdot_alias_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _drift_inputs(tmp_path)
+    (tmp_path / "sub").mkdir()
+    alias = tmp_path / "sub" / ".." / paths["baseline_set"].name
+    _assert_rejected(paths, alias, "--baseline-candidate-set", capsys, monkeypatch)
+
+
+def test_cli_compare_output_relative_alias_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _drift_inputs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _assert_rejected(paths, Path(".") / paths["current"].name, "--current", capsys, monkeypatch)
+
+
+def test_cli_compare_output_symlink_alias_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _drift_inputs(tmp_path)
+    link = tmp_path / "link.json"
+    try:
+        link.symlink_to(paths["baseline"])
+    except (OSError, NotImplementedError) as exc:  # e.g. Windows without symlink privilege
+        pytest.skip(f"symlink creation not supported here: {exc}")
+    _assert_rejected(paths, link, "--baseline", capsys, monkeypatch)
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("with_sets", [True, False])
+def test_cli_compare_separate_output_still_written(tmp_path: Path, with_sets: bool) -> None:
+    paths = _drift_inputs(tmp_path)
+    before = _snapshot(paths)
+    out = tmp_path / "reports" / "compare.json"
+    assert main(_compare_args(paths, out, with_sets=with_sets)) == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["command"] == "compare"
+    assert ("candidate_set_drift" in data["metrics"]) is with_sets
+    assert _snapshot(paths) == before
+
