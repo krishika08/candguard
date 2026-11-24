@@ -33,7 +33,9 @@ def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]
 
     try:
         data = json.loads(content)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is a ValueError; Python 3.11+ also raises a plain ValueError for an
+        # integer literal longer than the interpreter's int-string conversion limit.
         raise AuditError(f"Could not parse {label} JSON report ({path}): {exc}") from exc
 
     if not isinstance(data, dict):
@@ -69,6 +71,21 @@ def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]
     return path, data
 
 
+def _is_valid_recall(value: Any) -> bool:
+    """Return True for an int or finite float in [0, 1]; booleans and other types are invalid.
+
+    Integers are range-checked directly: ``math.isfinite()`` would raise OverflowError for
+    integers too large to convert to float (JSON allows arbitrarily long integer literals).
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return 0 <= value <= 1
+    if isinstance(value, float):
+        return math.isfinite(value) and 0.0 <= value <= 1.0
+    return False
+
+
 def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None:
     """Validate the optional ``ground_truth`` section so malformed values cannot skew recall gates.
 
@@ -87,12 +104,7 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
         )
 
     recall = truth.get("candidate_recall")
-    if recall is not None and (
-        isinstance(recall, bool)
-        or not isinstance(recall, (int, float))
-        or not math.isfinite(recall)
-        or not 0 <= recall <= 1
-    ):
+    if recall is not None and not _is_valid_recall(recall):
         raise AuditError(
             f"Invalid 'ground_truth.candidate_recall' in {label} report ({path}): "
             f"expected a finite number between 0 and 1 or null, got {recall!r}."

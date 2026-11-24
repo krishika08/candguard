@@ -464,6 +464,47 @@ def test_invalid_candidate_recall_rejected(tmp_path: Path, bad_recall: Any, side
         compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
 
 
+HUGE_INT = 10**400  # a valid JSON number that math.isfinite() cannot convert to float
+
+
+@pytest.mark.parametrize("huge", [HUGE_INT, -HUGE_INT], ids=["10**400", "-10**400"])
+@pytest.mark.parametrize("side", ["Baseline", "Current"])
+@pytest.mark.parametrize("gate", [None, 0.05])
+def test_huge_integer_recall_rejected_without_overflow(tmp_path: Path, huge: int, side: str, gate: float | None) -> None:
+    bad = _with_truth(_valid_report(), candidate_recall=huge)
+    good = _valid_report()
+    b_f, c_f = _pair_files(tmp_path, bad if side == "Baseline" else good, good if side == "Baseline" else bad)
+    # JSON round trip: the report on disk yields the same arbitrary-precision int via json.loads().
+    loaded = json.loads((b_f if side == "Baseline" else c_f).read_text(encoding="utf-8"))
+    assert type(loaded["ground_truth"]["candidate_recall"]) is int
+    assert loaded["ground_truth"]["candidate_recall"] == huge
+    with pytest.raises(AuditError, match=rf"Invalid 'ground_truth.candidate_recall' in {side} report .* between 0 and 1"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=gate)
+
+
+def test_huge_integer_recall_in_both_reports_rejected(tmp_path: Path) -> None:
+    b_f, c_f = _pair_files(
+        tmp_path, _with_truth(_valid_report(), candidate_recall=HUGE_INT),
+        _with_truth(_valid_report(), candidate_recall=HUGE_INT),
+    )
+    with pytest.raises(AuditError, match=r"Invalid 'ground_truth.candidate_recall' in Baseline report"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+
+
+def test_integer_literal_beyond_int_conversion_limit_is_clean_error(tmp_path: Path) -> None:
+    # 5,001 digits: Python 3.11+ json.loads() raises a plain ValueError (int-string conversion
+    # limit); Python 3.10 parses it and recall validation rejects it. Both must be AuditError.
+    text = json.dumps(_valid_report(candidate_recall=0.85)).replace(
+        '"candidate_recall": 0.85', '"candidate_recall": 1' + "0" * 5000
+    )
+    assert '"candidate_recall": 1000' in text
+    c_f = tmp_path / "curr.json"
+    c_f.write_text(text, encoding="utf-8")
+    b_f = _write_json(tmp_path / "base.json", _valid_report())
+    with pytest.raises(AuditError, match=r"Could not parse Current JSON report|Invalid 'ground_truth.candidate_recall' in Current report"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.05)
+
+
 @pytest.mark.parametrize("edge", [0, 1, 0.0, 1.0])
 def test_boundary_recall_values_are_valid(tmp_path: Path, edge: float) -> None:
     b_f, c_f = _pair_files(
@@ -555,6 +596,7 @@ MALFORMED_TRUTH_CASES = {
     "recall-bool": lambda r: r["ground_truth"].update(candidate_recall=True),
     "fingerprint-int": lambda r: r["ground_truth"].update(fingerprint=7),
     "version-null": lambda r: r["ground_truth"].update(fingerprint_version=None),
+    "recall-huge-int": lambda r: r["ground_truth"].update(candidate_recall=HUGE_INT),
 }
 
 
@@ -576,12 +618,17 @@ def test_cli_malformed_report_exits_2_without_traceback(
     assert captured.out == ""
 
 
-def test_cli_subprocess_malformed_report_has_no_traceback(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("bad_recall", "expected"),
+    [(float("inf"), "got inf"), (HUGE_INT, "got 1000000000"), (-HUGE_INT, "got -1000000000")],
+    ids=["infinity", "huge-int", "huge-negative-int"],
+)
+def test_cli_subprocess_malformed_report_has_no_traceback(tmp_path: Path, bad_recall: Any, expected: str) -> None:
     import os
     import subprocess
     import sys
 
-    bad = _with_truth(_valid_report(), candidate_recall=float("inf"))
+    bad = _with_truth(_valid_report(), candidate_recall=bad_recall)
     b_f, c_f = _pair_files(tmp_path, _valid_report(), bad)
     src = str(Path(__file__).resolve().parent.parent / "src")
     env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
@@ -592,5 +639,6 @@ def test_cli_subprocess_malformed_report_has_no_traceback(tmp_path: Path) -> Non
     )
     assert proc.returncode == 2
     assert "Traceback" not in proc.stderr
+    assert "OverflowError" not in proc.stderr
     assert "Invalid 'ground_truth.candidate_recall' in Current report" in proc.stderr
-    assert "got inf" in proc.stderr
+    assert expected in proc.stderr
