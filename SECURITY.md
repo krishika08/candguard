@@ -2,12 +2,14 @@
 
 ## Supported Versions
 
-CandGuard maintains security updates for the current active release line:
+CandGuard maintains security updates for the current published release line:
 
 | Version | Supported          |
 | ------- | ------------------ |
 | 0.1.x   | :white_check_mark: |
 | < 0.1.0 | :x:                |
+
+The next release line, 0.2.x, is in development on the `main` branch and has not been published. Its support status will be added to this table when v0.2.0 is released. Until then, 0.1.x remains the supported release line.
 
 ## Reporting a Vulnerability
 
@@ -24,8 +26,8 @@ Please report security vulnerabilities privately via GitHub Private Vulnerabilit
 
 To help us triage and resolve the issue quickly, please provide:
 1. A description of the vulnerability and its potential impact.
-2. Steps to reproduce the issue (including sample CSV/TSV fixtures if applicable, ensuring no private or sensitive data is included).
-3. The CandGuard version, Python version, and operating system where the vulnerability was observed.
+2. Steps to reproduce the issue, including sample CSV/TSV or Parquet fixtures if applicable. Make sure no private or sensitive data is included.
+3. The CandGuard version (or the commit, if you are using a development checkout), Python version, and operating system where the vulnerability was observed.
 4. Any potential mitigations or suggested fixes.
 
 ### Response Process
