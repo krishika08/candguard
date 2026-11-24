@@ -25,10 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit a candidate-pair CSV/TSV file",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    audit.add_argument("--candidates", required=True, help="Candidate-pair CSV/TSV with a header")
+    audit.add_argument("--candidates", required=True, help="Candidate-pair CSV/TSV with a header, or .parquet (requires candguard[parquet])")
     audit.add_argument("--left-id", required=True, help="Column name for left/source record ID")
     audit.add_argument("--right-id", required=True, help="Column name for right/target record ID")
-    audit.add_argument("--truth", help="Optional ground-truth matching-pair CSV/TSV")
+    audit.add_argument("--truth", help="Optional ground-truth matching-pair CSV/TSV, or .parquet (requires candguard[parquet])")
     audit.add_argument("--truth-left-id", help="Left ID column in truth file; defaults to --left-id")
     audit.add_argument("--truth-right-id", help="Right ID column in truth file; defaults to --right-id")
     audit.add_argument("--delimiter", help=r"Candidate delimiter (default: tab for .tsv, comma otherwise; use '\t' for tab)")

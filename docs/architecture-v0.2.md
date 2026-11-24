@@ -135,7 +135,7 @@ class CandidateReader(Protocol):
 1. **Streaming Batch Ingestion:** Readers stream candidate files and yield fixed-size chunks (`batch_size=50_000` by default, validated to be a positive integer). The storage engine avoids loading whole candidate datasets into Python lists. Batching bounds the size of each Python-side insert batch, not total process memory. Memory consumption remains workload- and configuration-dependent and has been measured to increase with dataset size; no $O(1)$ constant-memory guarantee is made. The documented 10-million-pair boundary is an empirical validation limit on tested hardware, not a constant-memory guarantee.
 2. **Whitespace and Identifier Normalization:** Identifiers are extracted, trimmed of leading/trailing whitespace, and validated as non-empty text strings before yielding.
 3. **Delimiter Detection & Overrides:** `DelimitedReader` inspects file extension (`.tsv`, `.tab` vs `.csv`) or applies explicit delimiter overrides with full Unicode escape sequence decoding (`\t`, `|`, `;`).
-4. **Parquet Integration Boundary:** The reader factory (`get_reader`) checks file extensions. If `.parquet` is requested without `pyarrow` installed, it raises an informative `AuditError` explaining the missing optional dependency. When implemented, `ParquetReader` will implement `CandidateReader` using `pyarrow.dataset.Scanner` or `fastparquet` without requiring any changes to the storage engine.
+4. **Parquet Reader:** The reader factory (`get_reader`) dispatches `.parquet` paths (case-insensitive) to `ParquetReader`, which implements `CandidateReader` using `pyarrow.parquet.ParquetFile.iter_batches()` with column projection. It needs no storage-engine changes. PyArrow is an optional extra (`candguard[parquet]`) imported lazily. If it is missing, `get_reader` raises an `AuditError` with install instructions. Delimiter overrides are rejected for Parquet input. See `docs/parquet-guide.md`.
 
 ### 5.3 Storage Engine Contract
 The `SQLiteStorageEngine` manages local persistence:
@@ -264,7 +264,7 @@ CandGuard enforces a **strict zero-runtime-dependency constraint**:
 2. **Optional Features:** Advanced columnar readers (e.g. Parquet) must be packaged as optional extras:
    ```toml
    [project.optional-dependencies]
-   parquet = ["pyarrow>=14.0.0"]
+   parquet = ["pyarrow>=25.0.1"]
    dev = ["pytest>=7.0", "pytest-cov>=4.0"]
    ```
 3. **No Heavy Frameworks:** CandGuard will not depend on pandas, polars, spark, or heavyweight ORMs for core functionality.

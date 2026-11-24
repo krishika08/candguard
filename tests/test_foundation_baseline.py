@@ -140,10 +140,16 @@ def test_percentile_helper_does_not_create_temp_databases() -> None:
         conn.close()
 
 
-def test_parquet_reader_dispatch_raises_informative_error(tmp_path: Path) -> None:
-    """Verify get_reader on parquet path raises clear unsupported/missing dependency error."""
+def test_parquet_reader_dispatch_raises_informative_error_without_pyarrow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify get_reader on a parquet path explains how to install the optional dependency."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
     pq_path = tmp_path / "test.parquet"
-    with pytest.raises(AuditError, match="Parquet support is not yet installed or enabled"):
+    with pytest.raises(AuditError, match=r'requires the optional PyArrow dependency.*pip install "candguard\[parquet\]"'):
         get_reader(pq_path, "left_id", "right_id")
 
 

@@ -29,6 +29,18 @@ candguard audit \
 
 To audit your own files, each file must have a header. The candidate file contains the pairs passed to your matching model; the optional truth file contains known matching pairs. IDs are compared as trimmed strings. In cross-linkage mode, pair direction is preserved; in deduplication mode, pairs are treated as logically unordered and canonicalized.
 
+### Optional Parquet input
+
+CSV/TSV support has no dependencies. To also read `.parquet` candidate or ground-truth files, install the optional PyArrow extra:
+
+```bash
+pip install "candguard[parquet]"        # or, from a checkout: pip install -e ".[parquet]"
+
+candguard audit --candidates candidates.parquet --truth truth.parquet   --left-id source_id --right-id candidate_id
+```
+
+Identifier columns must be string or integer typed. Strings are trimmed like CSV/TSV values, integers become decimal text, and nulls or other types are rejected. See [`docs/parquet-guide.md`](docs/parquet-guide.md) for type rules, error messages, Python-version compatibility, and measured CSV/TSV/Parquet comparisons.
+
 ## Example output
 
 The bundled data is intentionally tiny and synthetic:
@@ -191,7 +203,7 @@ Candidate recall is a **ceiling on pair recall for downstream models**, not the 
 
 ## Limitations of v0.1
 
-- CSV/TSV files with headers only; Parquet support is not implemented yet.
+- Inputs are CSV/TSV files with headers, or single `.parquet` files with the optional `candguard[parquet]` extra. Partitioned Parquet datasets, remote storage, and other formats are not supported.
 - SQLite provides disk-backed processing validated up to 10,000,000 candidate pairs on the documented host machine (see [`docs/benchmark-report.md`](docs/benchmark-report.md)). Larger workloads (>10M rows) have not been validated. Measured throughput spans 200k–361k rows/s across all scales (201k–287k rows/s at 10M rows) on that host and is not a performance SLA for arbitrary customer datasets.
 - Memory usage is disk-backed but peak resident memory increases with dataset size (from ~45 MB at 100k rows to ~419 MB at 10M rows in isolated child processes); it is not an $\mathcal{O}(1)$ constant-memory guarantee.
 - The truth file must represent known matching pairs in the same left/right orientation as the candidate file for cross-dataset linkage (deduplication mode handles unordered pairs automatically).
@@ -203,6 +215,10 @@ Candidate recall is a **ceiling on pair recall for downstream models**, not the 
 
 ```bash
 pip install -e ".[dev]"
+pytest
+
+# include the optional Parquet tests (skipped when PyArrow is not installed)
+pip install -e ".[dev,parquet]"
 pytest
 ```
 
