@@ -31,7 +31,7 @@ In v0.1.0, CandGuard operated through three primary modules:
 
 ### Strengths of v0.1.0
 - **Zero Runtime Dependencies:** Production package ran purely on Python 3.10+ Standard Library and built-in SQLite.
-- **Disk-Backed Processing:** Ingests input files in streaming batches and delegates pair aggregation to an isolated, disk-backed SQLite database. Memory consumption is workload- and configuration-dependent; empirical benchmarks show resident memory increases with dataset size (from ~45 MB at 100k rows to ~419 MB at 10M rows in isolated child processes). The documented 10-million-pair boundary is an empirical validation limit on tested hardware, and no $O(1)$ constant-memory guarantee is made.
+- **Disk-Backed Processing:** Ingests input files in streaming batches and delegates pair aggregation to an isolated, disk-backed SQLite database. Memory consumption is workload- and configuration-dependent; recorded benchmarks show peak memory increasing with dataset size (about 45 MB at 100k rows to about 419 MB at 10M rows; see `docs/benchmark-report.md`). The documented 10-million-pair boundary is an empirical validation limit on tested hardware, and no $O(1)$ constant-memory guarantee is made.
 - **Deterministic CLI Exit Codes:** Predictable contract (`0` = pass, `1` = gate failure, `2` = invalid input).
 - **Hardened Hashing:** Unambiguous length-prefixed ground-truth fingerprinting (v2) prevented false comparability claims.
 
@@ -132,7 +132,7 @@ class CandidateReader(Protocol):
 ```
 
 ### 5.2 Batch Processing Contract
-1. **Streaming Batch Ingestion:** Readers stream candidate files and yield fixed-size chunks (`batch_size=50_000` by default, validated to be a positive integer). The storage engine avoids loading whole candidate datasets into Python lists. Memory consumption remains workload- and configuration-dependent, increasing with dataset size due to SQLite page cache dynamics, memory-mapped I/O, and identifier cardinality; no $O(1)$ constant-memory guarantee is made. The documented 10-million-pair boundary is an empirical validation limit on tested hardware, not a constant-memory guarantee.
+1. **Streaming Batch Ingestion:** Readers stream candidate files and yield fixed-size chunks (`batch_size=50_000` by default, validated to be a positive integer). The storage engine avoids loading whole candidate datasets into Python lists. Batching bounds the size of each Python-side insert batch, not total process memory. Memory consumption remains workload- and configuration-dependent and has been measured to increase with dataset size; no $O(1)$ constant-memory guarantee is made. The documented 10-million-pair boundary is an empirical validation limit on tested hardware, not a constant-memory guarantee.
 2. **Whitespace and Identifier Normalization:** Identifiers are extracted, trimmed of leading/trailing whitespace, and validated as non-empty text strings before yielding.
 3. **Delimiter Detection & Overrides:** `DelimitedReader` inspects file extension (`.tsv`, `.tab` vs `.csv`) or applies explicit delimiter overrides with full Unicode escape sequence decoding (`\t`, `|`, `;`).
 4. **Parquet Integration Boundary:** The reader factory (`get_reader`) checks file extensions. If `.parquet` is requested without `pyarrow` installed, it raises an informative `AuditError` explaining the missing optional dependency. When implemented, `ParquetReader` will implement `CandidateReader` using `pyarrow.dataset.Scanner` or `fastparquet` without requiring any changes to the storage engine.
@@ -287,6 +287,6 @@ CandGuard enforces a **strict zero-runtime-dependency constraint**:
 
 - **Disk-Backed SQLite Processing:** Candidate and ground-truth pairs are stored in a temporary SQLite database rather than in-memory Python structures.
 - **Batch Ingestion:** Inputs are parsed and inserted in configurable batches (`batch_size=50_000` by default). Batch sizes must be positive integers (`batch_size > 0`).
-- **Workload-Dependent Memory:** Resident memory consumption is workload- and configuration-dependent. Existing empirical measurements demonstrate that peak memory increases with dataset size (e.g., ~45 MB peak RSS at 100k rows, ~83 MB at 1M rows, and ~419 MB at 10M rows).
+- **Workload-Dependent Memory:** Resident memory consumption is workload- and configuration-dependent. Existing measurements in `docs/benchmark-report.md` show peak memory increasing with dataset size: roughly 45–47 MB at 100k rows, 163–170 MB at 1M rows, 325–327 MB at 5M rows, and 419–420 MB at 10M rows, across the `cross_no_truth`, `cross_with_truth`, and `dedupe_with_truth` workflows on the documented test machine.
 - **No $O(1)$ Memory Guarantee:** CandGuard does not make an $O(1)$ constant-memory guarantee.
 - **Empirical Scale Boundary:** The 10-million-pair benchmark represents an empirical validation boundary on documented hardware, not an architectural guarantee for arbitrary dataset sizes or hardware environments.
