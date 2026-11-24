@@ -91,7 +91,8 @@ def audit_candidates(
 ) -> dict[str, Any]:
     """Audit a candidate-pair file and optionally compare it with ground truth.
 
-    Files must be CSV or TSV with header rows. IDs are compared as trimmed text.
+    Files must be CSV or TSV with header rows, or Parquet files (``.parquet``; requires the
+    optional ``candguard[parquet]`` extra). IDs are compared as trimmed text.
     In cross mode, candidate pairs are directional: (left, right) is distinct from (right, left).
     In dedupe mode, pairs are logically unordered and stored canonically (min, max).
     """
@@ -109,8 +110,16 @@ def audit_candidates(
         has_missed_pairs_path=missed_pairs_path is not None,
     )
 
+    # Build readers before ingesting anything so configuration errors (for example a delimiter
+    # override on Parquet input, or a missing optional dependency) are reported up front.
+    cand_reader = get_reader(candidates_file, left_id, right_id, delimiter=delimiter)
+    truth_left = truth_left_id or left_id
+    truth_right = truth_right_id or right_id
+    truth_reader: CandidateReader | None = None
+    if truth_file is not None:
+        truth_reader = get_reader(truth_file, truth_left, truth_right, delimiter=truth_delimiter)
+
     with SQLiteStorageEngine() as engine:
-        cand_reader = get_reader(candidates_file, left_id, right_id, delimiter=delimiter)
         candidate_rows, unique_candidate_pairs = engine.ingest_candidates(
             cand_reader, linkage_type=linkage_type
         )
@@ -166,10 +175,7 @@ def audit_candidates(
             )
 
         ground_truth: dict[str, Any] | None = None
-        if truth_file is not None:
-            truth_left = truth_left_id or left_id
-            truth_right = truth_right_id or right_id
-            truth_reader = get_reader(truth_file, truth_left, truth_right, delimiter=truth_delimiter)
+        if truth_file is not None and truth_reader is not None:
             truth_rows, truth_unique = engine.ingest_truth(truth_reader, linkage_type=linkage_type)
 
             if truth_unique == 0 and min_recall is not None:

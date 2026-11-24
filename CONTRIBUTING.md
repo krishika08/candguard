@@ -54,6 +54,26 @@ candguard audit \
   --min-recall 0.60
 ```
 
+### Optional dependencies (Parquet)
+
+Parquet support depends on the optional `pyarrow` extra and must stay optional. Run the suite in both configurations:
+
+```bash
+# Default, dependency-free install: Parquet tests that need PyArrow are skipped,
+# while the missing-dependency and import-isolation tests still run.
+pip install -e ".[dev]"
+pytest --cov=candguard
+
+# With the optional extra: the full Parquet suite runs.
+pip install -e ".[dev,parquet]"
+pytest --cov=candguard
+```
+
+Rules for optional-dependency code:
+- Never import `pyarrow` at module import time; import it lazily inside the code path that needs it.
+- Tests that need PyArrow must skip cleanly when it is missing (see `needs_pyarrow` in `tests/test_parquet_reader.py`).
+- Generate Parquet fixtures inside tests; do not commit binary fixtures or large benchmark data.
+
 Verify distribution package builds:
 
 ```bash
