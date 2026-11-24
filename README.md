@@ -4,21 +4,57 @@
 
 Candidate generation (also called *blocking*) decides which record pairs a matching model is allowed to inspect. If a true pair is filtered out here, a later model cannot recover it. But evaluating blocking often means writing one-off scripts, and the best trade-off depends on both candidate recall and the number of comparisons produced.
 
-CandGuard is a small, local-first CLI that audits CSV/TSV candidate-pair files and can fail a command when quality thresholds are missed. It is framework-agnostic: use it with output from your own blocker, a competition pipeline, or an existing record-linkage package.
+CandGuard is a small, local-first CLI that audits candidate-pair files and fails a command when quality thresholds are missed. It is framework-agnostic: use it with output from your own blocker, a competition pipeline, or an existing record-linkage package.
 
-> **Status:** experimental MVP. CSV/TSV only. SQLite provides disk-backed processing validated up to 10,000,000 candidate pairs (measured at 34.9s–49.7s elapsed wall time and ~419 MB peak resident memory in isolated processes on an Intel Core Ultra 5 125H with 16 GiB RAM). Peak memory increases sub-linearly with dataset size and is an empirical measurement, not a constant-memory guarantee; larger workloads (>10M rows) have not been validated. See [`docs/benchmark-report.md`](docs/benchmark-report.md) for full benchmarks and hardware details.
+## Project status
+
+CandGuard is experimental. The published package and the development branch currently have **different capabilities**:
+
+| | Version | What it includes |
+|:--|:--|:--|
+| **Latest PyPI release** | `0.1.0` | CSV/TSV candidate audits, candidate recall against ground truth, missed-pair export, reduction ratio, audit quality gates, and `candguard compare` with recall-drop, pair-growth and duplicate-growth gates. |
+| **Development branch (`main`)** | unreleased, planned for `0.2.0` | Everything in 0.1.0, plus optional Parquet input, record-coverage and candidate-degree diagnostics, candidate-set drift analysis with an optional Jaccard gate, output-collision protections, and stricter validation of compare reports. |
+
+Features on `main` are **not** available in the published `0.1.0` package, and should not be assumed to exist in a `pip install candguard` installation. Version 0.2.0 has not been released yet. Until the release version bump, a development checkout still reports `candguard 0.1.0` from `candguard --version`, even though it contains the unreleased changes. See [`CHANGELOG.md`](CHANGELOG.md) for what is new on `main`.
+
+## Installation
+
+Requires Python 3.10 or newer. Neither install path has any default runtime dependencies.
+
+### Published release (0.1.0)
+
+```bash
+pip install candguard==0.1.0
+```
+
+This installs the published v0.1.0 functionality: CSV/TSV input, the audit command and the original `compare` gates. The published 0.1.0 distribution has **no** `parquet` extra and none of the unreleased features listed above.
+
+### Development checkout (unreleased)
+
+```bash
+git clone https://github.com/krishika08/candguard.git
+cd candguard
+python -m venv .venv
+# macOS/Linux:          source .venv/bin/activate
+# Windows PowerShell:   .venv\Scripts\Activate.ps1
+pip install -e .
+```
+
+This installs the current development source in editable mode, including the unreleased features.
+
+To read `.parquet` files from the development source, install the optional extra:
+
+```bash
+pip install -e ".[parquet]"
+```
+
+The extra requires `pyarrow>=25.0.1`; on Python 3.10 this resolves to PyArrow 25.x. PyArrow is imported only when a `.parquet` file is read, so CSV/TSV audits never load it. The error shown when PyArrow is missing suggests `pip install "candguard[parquet]"`. That command only works from PyPI once a release containing the extra is published, so from a checkout use the command above.
 
 ## Quick start
 
-Requires Python 3.10+.
+From a development checkout (the example files are not part of the published package):
 
 ```bash
-python -m venv .venv
-# macOS/Linux
-source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -e .
-
 candguard audit \
   --candidates examples/candidates.tsv \
   --truth examples/truth.tsv \
@@ -27,23 +63,9 @@ candguard audit \
   --min-recall 0.60
 ```
 
-To audit your own files, each file must have a header. The candidate file contains the pairs passed to your matching model; the optional truth file contains known matching pairs. IDs are compared as trimmed strings. In cross-linkage mode, pair direction is preserved; in deduplication mode, pairs are treated as logically unordered and canonicalized.
+Each input file must have a header. The candidate file contains the pairs passed to your matching model; the optional truth file contains known matching pairs. IDs are compared as trimmed strings. In cross-linkage mode, pair direction is preserved; in deduplication mode, pairs are treated as unordered and canonicalized.
 
-### Optional Parquet input
-
-CSV/TSV support has no dependencies. To also read `.parquet` candidate or ground-truth files, install the optional PyArrow extra:
-
-```bash
-pip install "candguard[parquet]"        # or, from a checkout: pip install -e ".[parquet]"
-
-candguard audit --candidates candidates.parquet --truth truth.parquet   --left-id source_id --right-id candidate_id
-```
-
-Identifier columns must be string or integer typed. Strings are trimmed like CSV/TSV values, integers become decimal text, and nulls or other types are rejected. See [`docs/parquet-guide.md`](docs/parquet-guide.md) for type rules, error messages, Python-version compatibility, and measured CSV/TSV/Parquet comparisons.
-
-## Example output
-
-The bundled data is intentionally tiny and synthetic:
+The bundled data is intentionally tiny and synthetic. On the current development branch the command prints:
 
 ```text
 CandGuard — Candidate Generation Audit
@@ -66,12 +88,52 @@ Recovered by candidate set:      2
 Missing before model scoring:    1
 Candidate recall:                66.6667%
 
+Advanced degree diagnostics (unique pairs per record)
+-----------------------------------------------------
+                                 Source            Target
+Record coverage:                 n/a               n/a
+Records without candidates:      n/a               n/a
+Min / P50 / mean:                1 / 1 / 1.3333    1 / 1 / 1.3333
+P95 / P99 / P99.9 / max:         2 / 2 / 2 / 2     2 / 2 / 2 / 2
+Gini coefficient:                0.1667            0.1667
+Top 1% candidate share:          50.0000%          50.0000%
+Target/source mean degree ratio: 1.0000
+Note: --left-records/--right-records not supplied; statistics cover only records represented in candidate output.
+
 Quality gate: PASS
 ```
 
-Numbers above are illustrative; run the command to see the exact output.
+The published 0.1.0 package prints the same report without the "Advanced degree diagnostics" section.
 
-## Useful options
+## What CandGuard measures
+
+Items marked *(unreleased)* exist only on the development branch.
+
+- **Candidate volume:** candidate rows, unique pairs, duplicate rows, and the records represented on each side.
+- **Per-source candidate distribution:** min, median, mean, P95, P99 and max.
+- **Ground truth:** candidate recall (pair completeness) and missed true pairs, optionally written to a TSV.
+- **Reduction ratio:** reported when dataset sizes are supplied.
+- **Audit quality gates:** minimum recall, maximum unique pairs and maximum duplicate rows.
+- **Optional Parquet input** *(unreleased)*: single `.parquet` candidate or truth files, alongside CSV/TSV. See [`docs/parquet-guide.md`](docs/parquet-guide.md).
+- **Record coverage** *(unreleased, diagnostic)*: with `--left-records` / `--right-records`, the number of records on each side with no candidates and the fraction covered.
+- **Candidate-degree diagnostics** *(unreleased, diagnostic)*: distributions of unique candidate pairs per record, with source and target separate in cross-linkage and all records together in dedupe. Each reports min, P50/P95/P99/P99.9, mean, max, the Gini coefficient and the top-1% candidate share, plus the target/source mean-degree ratio. See [`docs/advanced-metrics.md`](docs/advanced-metrics.md).
+- **Regression comparison:** `candguard compare` between two audit reports, with recall-drop, pair-growth and duplicate-growth gates.
+- **Candidate-set drift** *(unreleased)*: exact retained, removed and added unique pairs, Jaccard similarity and churn between two audits, with an optional minimum-Jaccard gate. See [`docs/candidate-set-drift.md`](docs/candidate-set-drift.md).
+- **Safety checks** *(unreleased)*:
+  - `--output` and sidecar outputs are rejected when they resolve to an input or another output file;
+  - malformed ground-truth fields in compare reports are rejected instead of being silently accepted.
+
+Candidate recall is a **ceiling on pair recall for downstream models**, not the final entity-resolution score. Interpret reduction ratio and candidate recall together: high recall alone can be achieved by generating nearly every possible pair, which may be too expensive.
+
+### Technical contracts
+
+- Python `>=3.10`.
+- Zero default runtime dependencies. Parquet support is optional (`pyarrow>=25.0.1`) and loaded lazily.
+- Processing is disk-backed through SQLite. Memory use is not constant: peak resident memory grows with dataset size (see [Limitations](#limitations-current-development-branch)).
+- JSON reports use `schema_version` `"1.0"`. The development branch adds optional diagnostic fields to that schema; adding optional fields is not a breaking change, and consumers should ignore fields they do not recognize.
+- [Deterministic exit codes](#exit-codes) for CI use.
+
+## Auditing options
 
 Measure recall against labeled pairs and save the pairs the blocker missed:
 
@@ -84,7 +146,7 @@ candguard audit \
   --format json --output out/audit.json
 ```
 
-Estimate how aggressively the candidate generator reduces the search space for two datasets:
+Estimate how aggressively the candidate generator reduces the search space for two datasets. On the development branch, the same totals also enable record coverage:
 
 ```bash
 candguard audit \
@@ -93,7 +155,7 @@ candguard audit \
   --left-records 100000 --right-records 80000
 ```
 
-For within-dataset deduplication, use `--linkage-type dedupe --left-records N` instead. In dedupe mode, candidate pairs and truth pairs are treated as unordered, self-pairs are disallowed, and candidate counts represent comparisons per represented record. Reduction ratio is reported only when record counts are supplied.
+For within-dataset deduplication, use `--linkage-type dedupe --left-records N` instead. In dedupe mode, candidate and truth pairs are treated as unordered, self-pairs are disallowed, and candidate counts represent comparisons per represented record. Reduction ratio is reported only when record counts are supplied.
 
 Use the CLI as a lightweight CI gate:
 
@@ -107,15 +169,22 @@ candguard audit \
   --max-duplicate-rows 0
 ```
 
-Exit codes: `0` means all configured gates passed, `1` means a metric gate failed, and `2` means invalid input or configuration. A `--min-recall` gate requires a truth file.
+A `--min-recall` gate requires a truth file.
+
+On the development branch, `.parquet` candidate and truth files are accepted wherever CSV/TSV files are:
+
+```bash
+candguard audit --candidates candidates.parquet --truth truth.parquet \
+  --left-id source_id --right-id candidate_id
+```
+
+Identifier columns must be string or integer typed. Strings are trimmed like CSV/TSV values, integers become decimal text, and nulls or other types are rejected.
 
 ## Regression testing with `candguard compare`
 
-Candidate generation changes (new blocking keys, indexing rules, or nearest-neighbor thresholds) frequently trade recall against comparison volume. `candguard compare` enables automated CI checks between a baseline audit (e.g., from `main`) and a candidate PR branch to prevent silent recall regressions or comparison volume explosions.
+Candidate generation changes, such as new blocking keys, indexing rules or nearest-neighbor thresholds, frequently trade recall against comparison volume. `candguard compare` checks a current audit against a baseline (for example from `main`) in CI, to catch silent recall regressions or comparison-volume explosions.
 
-### Example comparison
-
-Save audit reports as JSON from both branches:
+Save audit reports as JSON from both runs:
 
 ```bash
 # Baseline run (e.g. on main branch)
@@ -142,7 +211,7 @@ candguard compare \
   --max-duplicate-growth 0.10
 ```
 
-### Example compare output
+Example output:
 
 ```text
 CandGuard — Regression Comparison Audit
@@ -164,15 +233,16 @@ Quality gate: FAIL
 
 ### Threshold and metric semantics
 
-- **Raw candidate rows vs. unique candidate pairs:** Raw candidate rows reflect the total output volume generated by the blocker before deduplication. Pair growth compares raw rows (`(current - baseline) / baseline`) to guard downstream pipelines against processing explosions. Unique candidate pairs deduplicate repeated occurrences.
-- **Recall drop (`--max-recall-drop`):** Absolute recall decrease, defined as `max(0.0, baseline_recall - current_recall)`. A threshold of `0.02` allows up to two percentage points of drop (e.g., from 95% to 93%). If current recall improves, drop is `0.0000` and passes.
-- **Pair growth (`--max-pair-growth`):** Fractional raw row growth: `(current - baseline) / baseline`. A threshold of `0.20` permits up to 20% growth.
-- **Duplicate growth (`--max-duplicate-growth`):** Fractional duplicate candidate row growth: `(current - baseline) / baseline`.
-- **Ground-truth comparability:** Recall comparisons verify that both reports used the exact same ground-truth dataset via an unambiguous length-prefixed serialization and SHA-256 fingerprint (`sha256:...`). Reports record an explicit `fingerprint_version` (current: `v2`). If ground-truth fingerprints differ, fingerprint versions are incompatible (e.g. `v1` vs `v2`), or fingerprints are missing, recall comparison fails safely with exit code 2. Pair-count-only and duplicate-growth-only comparisons do not require ground-truth comparability.
+- **Raw candidate rows vs. unique candidate pairs:** raw rows are the blocker's total output before deduplication; unique pairs count each pair once. Pair growth uses raw rows, to guard downstream pipelines against processing explosions.
+- **Recall drop (`--max-recall-drop`):** the absolute decrease `max(0.0, baseline_recall - current_recall)`. A threshold of `0.02` allows up to two percentage points of drop (for example from 95% to 93%). If current recall improves, the drop is `0.0000` and passes.
+- **Pair growth (`--max-pair-growth`):** fractional raw-row growth, `(current - baseline) / baseline`. A threshold of `0.20` permits up to 20% growth.
+- **Duplicate growth (`--max-duplicate-growth`):** fractional duplicate-row growth, `(current - baseline) / baseline`.
+- **Ground-truth comparability:** recall comparisons verify that both reports used exactly the same ground truth. They compare a SHA-256 fingerprint built from an unambiguous, length-prefixed encoding of the truth pairs. Reports record a `fingerprint_version` (currently `v2`). If the fingerprints differ, their versions are incompatible, or a fingerprint is missing, the recall comparison fails safely with exit code 2. Pair-growth and duplicate-growth comparisons do not require ground truth.
+- **Report validation** *(unreleased)*: `compare` rejects malformed `ground_truth` sections with exit code 2. This covers recall outside `[0, 1]`, NaN, infinity, booleans, non-numeric recall, and empty or non-string fingerprint fields. Reports without ground truth, with absent or `null` recall, or without a `fingerprint_version` (older reports) remain valid.
 
-### Candidate-set drift
+### Candidate-set drift *(unreleased)*
 
-Counts and recall can stay identical while a blocking change replaces most candidate pairs. To compare the actual candidate sets, export a sorted sidecar of unique pairs during each audit. Then pass both sidecars to `compare`:
+Counts and recall can stay identical while a blocking change replaces most candidate pairs. To compare the actual candidate sets, export a sorted sidecar of unique pairs during each audit, then pass both sidecars to `compare`:
 
 ```bash
 candguard audit --candidates base_candidates.tsv --left-id source_id --right-id candidate_id \
@@ -187,18 +257,19 @@ candguard compare \
   --min-candidate-jaccard 0.90
 ```
 
-`compare` verifies each sidecar's header, sort order, pair count and SHA-256 fingerprint against its report. It then merges the two files in one streaming pass and reports these, all on unique pairs:
+`compare` verifies each sidecar's header, sort order, pair count and SHA-256 fingerprint against its report. It then merges the two files in one streaming pass and reports these values, all computed on unique pairs:
 - retained, removed and added pairs;
 - Jaccard similarity and pair churn;
 - the removed fraction of the baseline and the added fraction of the current set.
 
-`--min-candidate-jaccard` is optional. Without it, drift is diagnostic only. Cross-linkage pairs keep their direction; dedupe pairs are undirected. See [`docs/candidate-set-drift.md`](docs/candidate-set-drift.md) for the sidecar format, definitions, a CI workflow, measured performance and limitations.
+`--min-candidate-jaccard` is optional; without it, drift is diagnostic only. Cross-linkage pairs keep their direction, and dedupe pairs are undirected. See [`docs/candidate-set-drift.md`](docs/candidate-set-drift.md) for the sidecar format, definitions, a CI workflow, measured performance and limitations.
 
-### Compare exit codes
+### Output safety *(unreleased)*
 
-- `0`: Valid comparison; all configured regression gates passed (or no gates were configured).
-- `1`: One or more regression gates failed (including `--min-candidate-jaccard`).
-- `2`: Invalid input, malformed JSON, unsupported schema versions, incompatible linkage types, mismatched ground-truth datasets, missing or unverifiable candidate-set artifacts, or I/O errors.
+Before reading any input, the CLI rejects (exit code 2) an output path that resolves to another file the command uses. It compares exact paths, relative and absolute aliases, `..` paths and symlinks:
+- `audit --output` cannot be the `--candidates`, `--truth`, `--missed-pairs-out` or `--candidate-set-out` file;
+- `--candidate-set-out` cannot be an input or the missed-pairs file;
+- `compare --output` cannot be either report or either candidate-set sidecar.
 
 ### Minimal CI example (GitHub Actions)
 
@@ -212,34 +283,23 @@ candguard compare \
             --max-pair-growth 0.20
 ```
 
-## Metrics
+## Exit codes
 
-- Candidate rows and unique ordered pairs.
-- Duplicate candidate rows.
-- Unique left and right IDs represented in the candidates.
-- Per-source candidate-count distribution (min, median, mean, p95, p99, max).
-- Candidate recall / pair completeness when ground truth is provided.
-- Missing true pairs, optionally written to a TSV.
-- Reduction ratio when source dataset sizes are known.
-- Exit-code quality gates for recall, maximum pair count, and duplicate rows.
-- **Record coverage against supplied totals** (diagnostic). With `--left-records` / `--right-records`, the report also shows how many records on each side have no candidates, and what fraction are covered.
-- **Degree analysis** (diagnostic). Distributions of unique candidate pairs per record: source and target separately in cross-linkage, all records in dedupe. Each gives min, P50/P95/P99/P99.9, mean, max, the Gini coefficient and the top-1% candidate share, plus the target/source mean-degree ratio. When totals are supplied, zero-degree records are included.
+Both `audit` and `compare` use the same exit codes:
 
-- **Candidate-set drift** (`compare`, opt-in). Exact retained/removed/added unique pairs, Jaccard similarity and churn between two audits' candidate-set sidecars, with an optional minimum-Jaccard gate.
+- `0`: the run succeeded and every configured quality gate passed (or no gates were configured).
+- `1`: one or more quality gates failed.
+- `2`: invalid input or configuration, or an operational error. Examples: missing columns or files, malformed JSON, unsupported schema versions, incompatible linkage types, mismatched ground-truth datasets, unverifiable candidate-set artifacts, output-path collisions and I/O errors.
 
-The advanced diagnostics are additive (schema `1.0` unchanged) and never affect the quality gate. Record totals give counts of records without candidates, not their IDs. See [`docs/advanced-metrics.md`](docs/advanced-metrics.md) for exact definitions, null cases, and measured overhead.
+## Limitations (current development branch)
 
-Candidate recall is a **ceiling on pair recall for downstream models**, not the final entity-resolution score. Reduction ratio and candidate recall should be interpreted together. High recall alone can be achieved by generating nearly every possible pair, which may be too expensive.
-
-## Limitations of v0.1
-
-- Inputs are CSV/TSV files with headers, or single `.parquet` files with the optional `candguard[parquet]` extra. Partitioned Parquet datasets, remote storage, and other formats are not supported.
-- SQLite provides disk-backed processing validated up to 10,000,000 candidate pairs on the documented host machine (see [`docs/benchmark-report.md`](docs/benchmark-report.md)). Larger workloads (>10M rows) have not been validated. Measured throughput spans 200k–361k rows/s across all scales (201k–287k rows/s at 10M rows) on that host and is not a performance SLA for arbitrary customer datasets.
-- Memory usage is disk-backed but peak resident memory increases with dataset size (from ~45 MB at 100k rows to ~419 MB at 10M rows in isolated child processes); it is not an $\mathcal{O}(1)$ constant-memory guarantee.
-- The truth file must represent known matching pairs in the same left/right orientation as the candidate file for cross-dataset linkage (deduplication mode handles unordered pairs automatically).
-- This tool audits output pairs; it does not generate blocking rules or infer missing ground truth.
-- Records with zero candidates can be *counted* when `--left-records`/`--right-records` are supplied, but not *listed*. Listing their IDs requires a full record roster, which is not supported yet.
-- Candidate identifiers are compared as strings. Normalize identifier formatting consistently before running an audit.
+- **Inputs:** CSV/TSV files with headers, or single `.parquet` files with the optional extra. Partitioned Parquet datasets, remote storage (for example object stores or URLs) and other input formats are not supported. The published 0.1.0 package supports CSV/TSV only.
+- **Scale and performance:** SQLite-backed processing has been validated up to 10,000,000 candidate pairs on one documented machine (Intel Core Ultra 5 125H, 15.5 GiB RAM, Windows 11, Python 3.12). There it took 34.9–49.7 s of elapsed time and about 419 MB of peak resident memory in isolated processes, with throughput of 200k–361k rows/s across tested scales. Larger workloads have not been validated, and these figures are measurements, not a performance guarantee. See [`docs/benchmark-report.md`](docs/benchmark-report.md).
+- **Memory:** usage is disk-backed but not constant. Peak resident memory grew from about 45 MB at 100k rows to about 419 MB at 10M rows in those measurements; there is no O(1) memory guarantee.
+- **Truth orientation:** for cross-dataset linkage, the truth file must list matching pairs in the same left/right orientation as the candidate file. Deduplication mode handles unordered pairs automatically.
+- **Scope:** CandGuard audits output pairs; it does not generate blocking rules or infer missing ground truth.
+- **Records without candidates** can be *counted* when `--left-records` / `--right-records` are supplied, but not *listed*. Listing their IDs requires a full record roster, which is not supported.
+- **Identifiers** are compared as strings. Normalize identifier formatting consistently before running an audit.
 
 ## Development
 
@@ -252,9 +312,11 @@ pip install -e ".[dev,parquet]"
 pytest
 ```
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidelines, [`SECURITY.md`](SECURITY.md) for reporting vulnerabilities, and [`docs/production-release-checklist.md`](docs/production-release-checklist.md) for the release procedure.
+
 ## Why this tool exists
 
-Existing record-linkage libraries and entity-resolution frameworks provide pieces of the workflow. CandGuard's proposed niche is to make *candidate-output auditing and CI thresholds* usable on CSV/TSV output from any framework without requiring a team to adopt a particular matching stack.
+Existing record-linkage libraries and entity-resolution frameworks provide pieces of the workflow. CandGuard's proposed niche is to make *candidate-output auditing and CI thresholds* usable on candidate files from any framework, without requiring a team to adopt a particular matching stack.
 
 See [`docs/market-validation.md`](docs/market-validation.md) for the initial competitor scan and the limits of the novelty claim.
 
