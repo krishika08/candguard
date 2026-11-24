@@ -4,10 +4,18 @@ CandGuard can read candidate-pair and ground-truth files in Apache Parquet forma
 
 ## Installing
 
+> **Availability:** Parquet support is on the development branch and is planned for v0.2.0, which has not been released. The latest published release, **CandGuard 0.1.0, does not provide the `parquet` extra** and cannot read Parquet files.
+
+**From a source checkout** (the method that works today). Run this from the repository root:
+
 ```bash
-pip install "candguard[parquet]"
-# from a source checkout:
-pip install -e ".[parquet]"
+python -m pip install -e ".[parquet]"
+```
+
+**From a published release that includes Parquet support.** This applies only once such a release is on PyPI, not to 0.1.0:
+
+```bash
+python -m pip install "candguard[parquet]"
 ```
 
 The `parquet` extra declares `pyarrow>=25.0.1` with no upper bound. pip chooses a PyArrow release whose `Requires-Python` metadata matches your interpreter:
@@ -19,10 +27,10 @@ The `parquet` extra declares `pyarrow>=25.0.1` with no upper bound. pip chooses 
 
 CSV/TSV users do not need PyArrow. Importing CandGuard never imports PyArrow; it is loaded only when a `.parquet` input is actually opened.
 
-If a `.parquet` input is given and PyArrow is missing, the audit stops with exit code `2`:
+If a `.parquet` input is given and PyArrow is missing, the audit stops with exit code `2`. The message lists both installation commands, each labeled with the installation it applies to:
 
 ```
-candguard: error: Reading Parquet input requires the optional PyArrow dependency, which is not installed or could not be imported (No module named 'pyarrow'). Install it with: pip install "candguard[parquet]"
+candguard: error: Reading Parquet input requires the optional PyArrow dependency, which is not installed or could not be imported (No module named 'pyarrow'). Install it with the command for how CandGuard was installed: from a published CandGuard release that includes Parquet support (CandGuard 0.1.0 does not), run `python -m pip install "candguard[parquet]"`; from a source checkout, run `python -m pip install -e ".[parquet]"` from the repository root.
 ```
 
 ## Usage
@@ -119,7 +127,7 @@ Every error below gives exit code `2`.
 
 | Message (abridged) | Cause / fix |
 |:--|:--|
-| `Reading Parquet input requires the optional PyArrow dependency ...` | Run `pip install "candguard[parquet]"`. |
+| `Reading Parquet input requires the optional PyArrow dependency ...` | From a source checkout, run `python -m pip install -e ".[parquet]"` in the repository root. From a published release that includes Parquet support (not 0.1.0), run `python -m pip install "candguard[parquet]"`. |
 | `A delimiter override (',') was supplied for Parquet input ...` | Remove `--delimiter`/`--truth-delimiter` for Parquet inputs. |
 | `Missing column(s) in X: col. Available columns: ...` | Check `--left-id`/`--right-id` (or `--truth-left-id`/`--truth-right-id`). |
 | `Left and right identifier columns cannot be identical ...` | Use two different columns. |

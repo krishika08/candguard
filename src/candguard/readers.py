@@ -4,8 +4,12 @@ Separates input file reading from the processing and storage engine:
 
 - ``DelimitedReader`` reads CSV/TSV text files using only the standard library.
 - ``ParquetReader`` reads Apache Parquet files through the optional ``pyarrow``
-  dependency (``pip install "candguard[parquet]"``). PyArrow is imported lazily,
-  so importing CandGuard never requires it.
+  dependency. Install it from a source checkout with
+  ``python -m pip install -e ".[parquet]"`` (run from the repository root), or, for a
+  published CandGuard release that includes Parquet support, with
+  ``python -m pip install "candguard[parquet]"``. The published 0.1.0 release does not
+  include Parquet support. PyArrow is imported lazily, so importing CandGuard never
+  requires it.
 """
 from __future__ import annotations
 
@@ -18,7 +22,19 @@ from .models import AuditError
 
 PARQUET_SUFFIXES = frozenset({".parquet"})
 
-PARQUET_INSTALL_HINT = 'pip install "candguard[parquet]"'
+#: Installs the optional extra from PyPI. Only works for a published release that declares the
+#: ``parquet`` extra; the published 0.1.0 release does not.
+PARQUET_RELEASE_INSTALL_COMMAND = 'python -m pip install "candguard[parquet]"'
+#: Installs the optional extra into an editable source checkout; run from the repository root.
+PARQUET_SOURCE_INSTALL_COMMAND = 'python -m pip install -e ".[parquet]"'
+
+# A single line, like every other AuditError message; backticks delimit each command.
+PARQUET_INSTALL_HINT = (
+    "Install it with the command for how CandGuard was installed: "
+    "from a published CandGuard release that includes Parquet support (CandGuard 0.1.0 does not), "
+    f"run `{PARQUET_RELEASE_INSTALL_COMMAND}`; "
+    f"from a source checkout, run `{PARQUET_SOURCE_INSTALL_COMMAND}` from the repository root."
+)
 
 
 def _validate_batch_size(batch_size: Any) -> None:
@@ -199,7 +215,7 @@ def _import_pyarrow_parquet() -> tuple[Any, Any]:
     except ImportError as exc:
         raise AuditError(
             "Reading Parquet input requires the optional PyArrow dependency, which is not installed "
-            f"or could not be imported ({exc}). Install it with: {PARQUET_INSTALL_HINT}"
+            f"or could not be imported ({exc}). {PARQUET_INSTALL_HINT}"
         ) from exc
     return pa, pq
 
@@ -221,7 +237,10 @@ def _identifier_kind(pa: Any, arrow_type: Any) -> str | None:
 class ParquetReader:
     """Reader for Apache Parquet candidate-pair and ground-truth files.
 
-    Requires the optional ``pyarrow`` dependency (``pip install "candguard[parquet]"``).
+    Requires the optional ``pyarrow`` dependency. From a source checkout, install it with
+    ``python -m pip install -e ".[parquet]"`` run from the repository root. From a published
+    CandGuard release that includes Parquet support (CandGuard 0.1.0 does not), use
+    ``python -m pip install "candguard[parquet]"``. See ``PARQUET_INSTALL_HINT``.
 
     Data is read incrementally with ``pyarrow.parquet.ParquetFile.iter_batches()``, projecting
     only the two identifier columns, and yielded in file row order.
