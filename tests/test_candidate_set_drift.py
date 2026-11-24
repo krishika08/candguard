@@ -44,8 +44,11 @@ Pair = tuple[str, str]
 def _write_delimited(path: Path, rows: Iterable[Iterable[str]], header: tuple[str, str] = ("l", "r"), delimiter: str = "\t") -> Path:
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream, delimiter=delimiter, lineterminator="\n")
+        # Python < 3.12 does not quote a bare "\r" under QUOTE_MINIMAL; quote such rows fully.
+        quote_all = csv.writer(stream, delimiter=delimiter, lineterminator="\n", quoting=csv.QUOTE_ALL)
         writer.writerow(header)
-        writer.writerows(rows)
+        for row in rows:
+            (quote_all if any("\r" in field for field in row) else writer).writerow(row)
     return path
 
 
@@ -258,6 +261,26 @@ def test_export_round_trips_special_identifiers(tmp_path: Path) -> None:
     assert report["candidate_set"]["fingerprint"] == compute_candidate_set_fingerprint_v1(expected, "cross")
     drift = _compare_files(artifact, report_path, artifact, report_path)["metrics"]["candidate_set_drift"]
     assert drift["jaccard_similarity"] == 1.0 and drift["retained_pairs"] == len(expected)
+
+
+def test_export_bytes_are_identical_on_every_python_version(tmp_path: Path) -> None:
+    pairs = sorted([("a\rb", "x"), ("c\nd", "y"), ('e"f', "z"), ("g\th", "w"), ("plain", "v"), ("p", "q\r\nr")])
+    out = tmp_path / "p.tsv"
+    write_candidate_set_artifact(pairs, out, linkage_type="cross", expected_pairs=len(pairs))
+    assert out.read_bytes() == (
+        b'left_id\tright_id\n'
+        b'"a\rb"\t"x"\n'          # any "\r" -> both fields quoted (Python < 3.12 would not quote it)
+        b'"c\nd"\ty\n'
+        b'"e""f"\tz\n'
+        b'"g\th"\tw\n'
+        b'"p"\t"q\r\nr"\n'
+        b'plain\tv\n'
+    )
+    meta = {"linkage_type": "cross", "unique_pairs": len(pairs),
+            "fingerprint": compute_candidate_set_fingerprint_v1(pairs, "cross")}
+    with CandidateSetArtifactReader(out, meta, label="Baseline") as reader:
+        assert list(reader) == pairs
+        assert reader.verified
 
 
 def test_export_empty_candidate_set(tmp_path: Path) -> None:

@@ -93,6 +93,12 @@ def write_candidate_set_artifact(
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
             writer = csv.writer(stream, delimiter="\t", quotechar='"', lineterminator="\n")
+            # Python < 3.12 QUOTE_MINIMAL does not quote a bare "\r" when the line terminator is
+            # "\n", which would split the row on read. Rows containing "\r" are therefore written
+            # with both fields quoted, so the bytes are identical on every supported Python.
+            quote_all = csv.writer(
+                stream, delimiter="\t", quotechar='"', lineterminator="\n", quoting=csv.QUOTE_ALL
+            )
             writer.writerow(CANDIDATE_SET_HEADER)
             previous: tuple[str, str] | None = None
             for pair in pairs:
@@ -111,7 +117,10 @@ def write_candidate_set_artifact(
                         f"Candidate identifier {_pair_text(pair)} contains a NUL character, which the csv "
                         "module of Python < 3.11 cannot read back; use Python 3.11+ to export this candidate set."
                     )
-                writer.writerow(pair)
+                if "\r" in left or "\r" in right:
+                    quote_all.writerow(pair)
+                else:
+                    writer.writerow(pair)
                 hasher.update(left, right)
                 previous = pair
             stream.flush()

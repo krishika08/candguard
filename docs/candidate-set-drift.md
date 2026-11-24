@@ -74,7 +74,7 @@ No sidecar is written unless one is requested. Without sidecar paths, `compare` 
 ## Sidecar format: `candguard-pairs-tsv-v1`
 
 - **Encoding:** UTF-8 without a byte-order mark, written by Python's `csv.writer`.
-- **Delimiter and quoting:** tab-delimited, with `"` as the quote character. A field is quoted only when it contains a tab, a quote, `\r` or `\n`; embedded quotes are doubled. Rows end with `\n`.
+- **Delimiter and quoting:** tab-delimited, with `"` as the quote character. A field is quoted when it contains a tab, a quote or `\n`; embedded quotes are doubled. Rows end with `\n`. If either identifier in a pair contains `\r`, both fields of that row are quoted. Python 3.10 and 3.11's minimal quoting would leave a bare `\r` unquoted, so this rule keeps the bytes identical on every supported Python version.
 - **Header:** exactly `left_id<TAB>right_id`. It does not repeat the input file's column names.
 - **Rows:** each data row is exactly one unique candidate pair. Duplicate raw candidate rows are collapsed before export.
 - **Order:** rows are in strict ascending `(left_id, right_id)` order. The export runs `ORDER BY left_id COLLATE BINARY, right_id COLLATE BINARY` over the audit's deduplicated SQLite table. For UTF-8 text, SQLite `BINARY` order is the same as Unicode code-point order, which is the order Python uses to compare `str` values. `compare` checks this order using Python string comparison.
