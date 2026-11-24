@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .metrics import compute_relative_growth
-from .models import AuditError, validate_compare_threshold
+from .candidate_set import compare_candidate_set_artifacts, validate_candidate_set_metadata
+from .metrics import compute_candidate_set_drift, compute_relative_growth
+from .models import AuditError, validate_compare_threshold, validate_unit_interval_threshold
 from .reporting import render_compare_text
 
 __all__ = [
@@ -74,14 +75,37 @@ def compare_reports(
     max_recall_drop: float | None = None,
     max_pair_growth: float | None = None,
     max_duplicate_growth: float | None = None,
+    baseline_candidate_set_path: str | Path | None = None,
+    current_candidate_set_path: str | Path | None = None,
+    min_candidate_jaccard: float | None = None,
 ) -> dict[str, Any]:
-    """Compare two CandGuard audit reports and evaluate regression quality gates."""
+    """Compare two CandGuard audit reports and evaluate regression quality gates.
+
+    When both ``baseline_candidate_set_path`` and ``current_candidate_set_path`` are given, the
+    two candidate-set sidecar artifacts are validated against the ``candidate_set`` metadata of
+    their reports and merged in one streaming pass to add ``metrics.candidate_set_drift``.
+    ``min_candidate_jaccard`` optionally fails the gate when Jaccard similarity is below it.
+    Without the artifact paths the comparison output is unchanged.
+    """
     for name, threshold in (
         ("max_recall_drop", max_recall_drop),
         ("max_pair_growth", max_pair_growth),
         ("max_duplicate_growth", max_duplicate_growth),
     ):
         validate_compare_threshold(name, threshold)
+    validate_unit_interval_threshold("min_candidate_jaccard", min_candidate_jaccard)
+
+    if (baseline_candidate_set_path is None) != (current_candidate_set_path is None):
+        missing = "current" if current_candidate_set_path is None else "baseline"
+        raise AuditError(
+            "Candidate-set drift requires both --baseline-candidate-set and --current-candidate-set; "
+            f"the {missing} candidate-set artifact was not supplied."
+        )
+    compare_candidate_sets = baseline_candidate_set_path is not None
+    if min_candidate_jaccard is not None and not compare_candidate_sets:
+        raise AuditError(
+            "--min-candidate-jaccard requires both --baseline-candidate-set and --current-candidate-set."
+        )
 
     baseline_file, baseline = _load_report(baseline_path, "Baseline")
     current_file, current = _load_report(current_path, "Current")
@@ -181,7 +205,7 @@ def compare_reports(
                 f"duplicate row growth {duplicate_growth:.2%} exceeds limit {max_duplicate_growth:.2%}"
             )
 
-    return {
+    report: dict[str, Any] = {
         "tool": "candguard",
         "version": __version__,
         "command": "compare",
@@ -225,3 +249,62 @@ def compare_reports(
             "failures": failures,
         },
     }
+
+    if baseline_candidate_set_path is not None and current_candidate_set_path is not None:
+        drift = _candidate_set_drift(
+            baseline=baseline,
+            current=current,
+            baseline_file=baseline_file,
+            current_file=current_file,
+            baseline_artifact=Path(baseline_candidate_set_path),
+            current_artifact=Path(current_candidate_set_path),
+            report=report,
+        )
+        report["metrics"]["candidate_set_drift"] = drift
+        report["thresholds"]["min_candidate_jaccard"] = min_candidate_jaccard
+        if min_candidate_jaccard is not None:
+            union = drift["union_pairs"]
+            # Gate on the unrounded ratio (correctly rounded division); equality passes.
+            measured = drift["retained_pairs"] / union if union else 1.0
+            if measured < min_candidate_jaccard:
+                failures.append(
+                    f"candidate-set Jaccard similarity {measured:.8f} ({measured:.4%}; "
+                    f"{drift['retained_pairs']:,} retained of {union:,} union pairs) "
+                    f"is below required minimum {min_candidate_jaccard:.8f} ({min_candidate_jaccard:.4%})"
+                )
+                report["quality_gate"]["passed"] = False
+
+    return report
+
+
+def _candidate_set_drift(
+    *,
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    baseline_file: Path,
+    current_file: Path,
+    baseline_artifact: Path,
+    current_artifact: Path,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate both artifacts against their reports and compute exact candidate-set drift."""
+    base_meta = validate_candidate_set_metadata(baseline, "Baseline", baseline_file)
+    curr_meta = validate_candidate_set_metadata(current, "Current", current_file)
+
+    retained, added, removed = compare_candidate_set_artifacts(
+        baseline_artifact, current_artifact, base_meta, curr_meta
+    )
+    drift = compute_candidate_set_drift(retained=retained, added=added, removed=removed)
+    if (
+        drift["baseline_unique_pairs"] != base_meta["unique_pairs"]
+        or drift["current_unique_pairs"] != curr_meta["unique_pairs"]
+    ):  # pragma: no cover - guaranteed by the artifact readers' count verification
+        raise AuditError("Candidate-set drift counts are inconsistent with the artifact metadata.")
+
+    for section, artifact, meta in (
+        ("baseline", baseline_artifact, base_meta),
+        ("current", current_artifact, curr_meta),
+    ):
+        report[section]["candidate_set_path"] = str(artifact)
+        report[section]["candidate_set_fingerprint"] = meta["fingerprint"]
+    return drift

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import __version__
+from .candidate_set import ensure_distinct_output
 from .metrics import compute_possible_pairs, compute_record_coverage, compute_reduction_ratio
 from .models import AuditError, validate_audit_arguments
 from .readers import CandidateReader, DelimitedReader, get_reader, resolve_delimiter
@@ -88,6 +89,7 @@ def audit_candidates(
     max_pairs: int | None = None,
     max_duplicate_rows: int | None = None,
     missed_pairs_path: str | Path | None = None,
+    candidate_set_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Audit a candidate-pair file and optionally compare it with ground truth.
 
@@ -95,6 +97,10 @@ def audit_candidates(
     optional ``candguard[parquet]`` extra). IDs are compared as trimmed text.
     In cross mode, candidate pairs are directional: (left, right) is distinct from (right, left).
     In dedupe mode, pairs are logically unordered and stored canonically (min, max).
+
+    When ``candidate_set_path`` is given, the unique normalized candidate pairs are exported
+    after a successful audit to a sorted ``candguard-pairs-tsv-v1`` sidecar (written atomically),
+    and the report gains a ``candidate_set`` section with its pair count and fingerprint.
     """
     candidates_file = Path(candidates_path)
     truth_file = Path(truth_path) if truth_path is not None else None
@@ -109,6 +115,17 @@ def audit_candidates(
         has_truth=truth_file is not None,
         has_missed_pairs_path=missed_pairs_path is not None,
     )
+
+    candidate_set_file = Path(candidate_set_path) if candidate_set_path is not None else None
+    if candidate_set_file is not None:
+        ensure_distinct_output(
+            candidate_set_file,
+            {
+                "candidate input file": candidates_file,
+                "ground-truth input file": truth_file,
+                "missed-pairs output file": missed_pairs_path,
+            },
+        )
 
     # Build readers before ingesting anything so configuration errors (for example a delimiter
     # override on Parquet input, or a missing optional dependency) are reported up front.
@@ -222,7 +239,7 @@ def audit_candidates(
         if max_duplicate_rows is not None and duplicate_rows > max_duplicate_rows:
             failures.append(f"duplicate candidate rows {duplicate_rows} exceed limit {max_duplicate_rows}")
 
-        return {
+        report: dict[str, Any] = {
             "tool": "candguard",
             "version": __version__,
             "schema_version": "1.0",
@@ -240,3 +257,13 @@ def audit_candidates(
             "ground_truth": ground_truth,
             "quality_gate": {"passed": not failures, "failures": failures},
         }
+
+        # Export last, after every other step (including ground truth) succeeded, so a failed
+        # audit never leaves a sidecar behind. Gate failures are results, not errors.
+        if candidate_set_file is not None:
+            report["candidate_set"] = engine.export_candidate_set(
+                candidate_set_file,
+                linkage_type=linkage_type,
+                expected_pairs=unique_candidate_pairs,
+            )
+        return report

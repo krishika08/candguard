@@ -33,6 +33,16 @@ jobs:
           candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --format json --output base.json
           candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --format json --output curr.json
           candguard compare --baseline base.json --current curr.json --max-recall-drop 0.01 --max-pair-growth 0.05
+      - name: Smoke test candidate-set drift CLI
+        shell: bash
+        run: |
+          candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --candidate-set-out drift/base.pairs.tsv --format json --output drift/base.json
+          candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --candidate-set-out drift/curr.pairs.tsv --format json --output drift/curr.json
+          candguard compare --baseline drift/base.json --current drift/curr.json --baseline-candidate-set drift/base.pairs.tsv --current-candidate-set drift/curr.pairs.tsv --min-candidate-jaccard 1.0
+          printf 'left_id\tright_id\nzz\ta\naa\tb\n' > drift/bad.pairs.tsv
+          code=0
+          candguard compare --baseline drift/base.json --current drift/curr.json --baseline-candidate-set drift/base.pairs.tsv --current-candidate-set drift/bad.pairs.tsv || code=$?
+          test "$code" -eq 2
       - name: Verify package distribution build
         run: |
           pip install build
@@ -93,3 +103,7 @@ jobs:
           candguard audit --candidates examples/candidates.tsv --truth examples/truth.tsv --left-id source_id --right-id candidate_id --format json --output tsv.json
           candguard audit --candidates candidates.parquet --truth truth.parquet --left-id source_id --right-id candidate_id --format json --output parquet.json
           candguard compare --baseline tsv.json --current parquet.json --max-recall-drop 0 --max-pair-growth 0 --max-duplicate-growth 0
+          candguard audit --candidates examples/candidates.tsv --left-id source_id --right-id candidate_id --candidate-set-out tsv.pairs.tsv --format json --output tsv-cs.json
+          candguard audit --candidates candidates.parquet --left-id source_id --right-id candidate_id --candidate-set-out parquet.pairs.tsv --format json --output parquet-cs.json
+          cmp tsv.pairs.tsv parquet.pairs.tsv
+          candguard compare --baseline tsv-cs.json --current parquet-cs.json --baseline-candidate-set tsv.pairs.tsv --current-candidate-set parquet.pairs.tsv --min-candidate-jaccard 1.0

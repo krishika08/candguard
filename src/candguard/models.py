@@ -113,7 +113,41 @@ class QualityGateReport(TypedDict):
     failures: list[str]
 
 
-class AuditReport(TypedDict):
+class CandidateSetReport(TypedDict):
+    """Metadata for an exported candidate-set sidecar (schema 1.0 additive extension).
+
+    Present only when the audit was run with ``--candidate-set-out``. The artifact path is
+    deliberately not recorded; ``compare`` receives artifact paths explicitly.
+    """
+
+    format: Literal["candguard-pairs-tsv-v1"]
+    unique_pairs: int
+    fingerprint: str
+    fingerprint_version: Literal["v1"]
+    linkage_type: LinkageType
+
+
+class CandidateSetDriftReport(TypedDict):
+    """Exact unique-pair set comparison added to ``compare`` metrics when artifacts are supplied."""
+
+    baseline_unique_pairs: int
+    current_unique_pairs: int
+    retained_pairs: int
+    added_pairs: int
+    removed_pairs: int
+    union_pairs: int
+    jaccard_similarity: float
+    pair_churn: float
+    removed_fraction_of_baseline: float | None
+    added_fraction_of_current: float | None
+
+
+class _AuditReportOptional(TypedDict, total=False):
+    # Schema 1.0 additive extension; present only when a candidate-set sidecar was exported.
+    candidate_set: CandidateSetReport
+
+
+class AuditReport(_AuditReportOptional):
     tool: str
     version: str
     schema_version: str
@@ -172,3 +206,16 @@ def validate_compare_threshold(name: str, threshold: float | None) -> None:
             or threshold < 0
         ):
             raise AuditError(f"{name} must be a finite non-negative number, got {threshold!r}.")
+
+
+def validate_unit_interval_threshold(name: str, threshold: float | None) -> None:
+    """Validate an optional threshold that must be a finite number in [0, 1]."""
+    if threshold is not None:
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or math.isnan(threshold)
+            or math.isinf(threshold)
+            or not 0 <= threshold <= 1
+        ):
+            raise AuditError(f"{name} must be a finite number between 0 and 1, got {threshold!r}.")

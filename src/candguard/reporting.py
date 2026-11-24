@@ -203,10 +203,38 @@ def render_compare_text(report: dict[str, Any]) -> str:
         f"Duplicate candidate rows:       {base_dupes:,} -> {curr_dupes:,}{dupe_growth_str}",
         f"Candidate recall:               {recall_str}",
         "",
-        f"Quality gate: {'PASS' if gate['passed'] else 'FAIL'}",
     ]
+    drift = metrics.get("candidate_set_drift")
+    if drift is not None:
+        lines.extend(_render_candidate_set_drift(drift, report.get("thresholds", {})))
+        lines.append("")
+    lines.append(f"Quality gate: {'PASS' if gate['passed'] else 'FAIL'}")
     lines.extend(f"  - {failure}" for failure in gate["failures"])
     return "\n".join(lines)
+
+
+def _render_candidate_set_drift(drift: dict[str, Any], thresholds: dict[str, Any]) -> list[str]:
+    """Render the candidate-set drift section of a comparison report."""
+    def share(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.2%}"
+
+    title = "Candidate-set drift (unique pairs)"
+    lines = [
+        title,
+        "-" * len(title),
+        f"Baseline unique pairs:          {drift['baseline_unique_pairs']:,}",
+        f"Current unique pairs:           {drift['current_unique_pairs']:,}",
+        f"Retained pairs:                 {drift['retained_pairs']:,}",
+        f"Removed from baseline:          {drift['removed_pairs']:,} ({share(drift['removed_fraction_of_baseline'])})",
+        f"Added in current:               {drift['added_pairs']:,} ({share(drift['added_fraction_of_current'])})",
+        f"Union of candidate pairs:       {drift['union_pairs']:,}",
+        f"Jaccard similarity:             {drift['jaccard_similarity']:.4%}",
+        f"Pair churn:                     {drift['pair_churn']:.4%}",
+    ]
+    minimum = thresholds.get("min_candidate_jaccard")
+    if minimum is not None:
+        lines.append(f"Minimum Jaccard similarity:     {minimum:.4%}")
+    return lines
 
 
 def report_json(report: dict[str, Any]) -> str:
