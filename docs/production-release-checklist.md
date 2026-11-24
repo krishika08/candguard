@@ -188,24 +188,75 @@ curl -s https://pypi.org/pypi/candguard/0.2.0/json \
   | python -c "import json, sys; [print(f['packagetype'], f['filename'], 'yanked' if f['yanked'] else '') for f in json.load(sys.stdin)['urls']]"
 ```
 
-`bdist_wheel` is the wheel (`candguard-0.2.0-py3-none-any.whl`), and `sdist` is the source distribution (`candguard-0.2.0.tar.gz`). Also check the files listed at <https://pypi.org/project/candguard/0.2.0/#files>, and read the `publish-to-pypi` log for upload lines for either file.
+`bdist_wheel` is the wheel (`candguard-0.2.0-py3-none-any.whl`), and `sdist` is the source distribution (`candguard-0.2.0.tar.gz`). Also check the files listed at <https://pypi.org/project/candguard/0.2.0/#files>.
 
-**Treat the result as uncertain when the sources disagree, or when you cannot rule out an upload.** For example:
-- the JSON API returns 404 but the job log shows an upload in progress or completed;
-- a file was deleted from PyPI (deleted files no longer appear, but their names still cannot be reused);
-- PyPI is returning errors.
+The JSON API and the files page show only what PyPI lists **now**. A 404 from the latest check does not prove that no upload ever happened for this version, so also check the workflow history below.
 
-The JSON API can lag briefly after an upload, so recheck after a few minutes before relying on a 404.
+#### Inspect every publish attempt for the target tag
+
+An earlier run, or an earlier attempt of the same run, can have uploaded a file even if the latest attempt shows no upload. Inspect **all** available `publish.yml` runs and attempts for the exact tag, not just the latest failed one. This includes runs from a tag that was deleted and pushed again, which can point at different commits.
+
+```bash
+# Every publish.yml run for the tag (tag pushes are listed under the tag name).
+# --all includes runs of the workflow while it was disabled.
+gh run list --repo krishika08/candguard --workflow publish.yml --branch v0.2.0 --all --limit 1000 \
+  --json databaseId,attempt,headSha,status,conclusion,createdAt
+
+# For each run ID, check every attempt from 1 up to the "attempt" value above
+gh run view <run-id> --repo krishika08/candguard --attempt <n> --log \
+  | grep -E "Uploading (distributions to|candguard-)|View at|already exists|HTTPError"
+
+# Every deployment record for the pypi environment and the tag. --paginate fetches all pages,
+# so older records cannot be silently omitted.
+gh api --paginate "repos/krishika08/candguard/deployments?environment=pypi&per_page=100" \
+  --jq '.[] | select(.ref == "v0.2.0") | "\(.id) \(.sha) \(.created_at)"'
+
+# For each deployment ID: its status history; log_url identifies the workflow run and job
+gh api --paginate "repos/krishika08/candguard/deployments/<deployment-id>/statuses" \
+  --jq '.[] | "\(.state) \(.created_at) \(.log_url)"'
+```
+
+**Incomplete run history:** `gh run list` returns at most `--limit` runs. If it returns exactly 1000 runs, the history may be truncated. Split it into narrower creation-date ranges, for example `--created "2026-11-01..2026-11-15"`, until every range returns fewer runs than the limit and the ranges together cover the whole period since the tag could first have been pushed. Incomplete history is never proof that no upload occurred.
+
+**Deployment records:** a deployment record identifies a `publish-to-pypi` job that targeted the `pypi` environment. It does not prove the job started. The record is created while the job is still waiting, for example for a required reviewer to approve the environment, and its statuses typically progress through `waiting`, `queued`, `in_progress` and then `success`, `failure` or `error`. For every deployment, follow its `log_url` to the run and job:
+- check the job's final status;
+- if the job ran, inspect its log with the commands above.
+
+A deployment still `waiting` or `queued` can still be approved and then upload. Resolve it (let it finish, or reject or cancel it) and re-check before classifying the version.
+
+In the `publish-to-pypi` log, `Uploading distributions to https://upload.pypi.org/legacy/` means an upload was attempted. `Uploading candguard-0.2.0-py3-none-any.whl` or `Uploading candguard-0.2.0.tar.gz` means that file's upload **started**; it does not prove the upload completed or failed. `View at:` follows a completed upload. (`Uploading artifact: candguard-dist.zip` is the GitHub Actions artifact step, not PyPI.) Any of these lines in any attempt is upload evidence.
+
+A missing, expired, inaccessible or inconclusive log is **never** proof that no upload occurred. GitHub deletes logs after the repository's retention period. A log that cannot be read, or a `pypi` deployment whose job log is gone, leaves that attempt unexplained.
+
+#### Classify the result
+
+The version has **no upload** only when **all** of these hold:
+
+1. The JSON API consistently returns 404. Recheck after allowing a few minutes for propagation, not just once.
+2. The PyPI files page lists no distribution for the version.
+3. Every available `publish.yml` run and attempt for the exact tag has been inspected, and every `pypi` deployment for the tag is accounted for.
+4. No log shows any upload evidence, and there is no known prior publication or deletion of any file for this version.
+5. All of these sources agree with each other.
+
+Treat the status as **uncertain** if any condition fails or cannot be checked. For example:
+- any attempt shows upload evidence, even if PyPI now returns 404;
+- a log is missing, expired, unreadable or inconclusive;
+- the run history may be incomplete, for example a run list reached its limit and was not split into narrower date ranges;
+- a `pypi` deployment is still `waiting` or `queued`, or its workflow run and job cannot be identified;
+- a file is known to have been deleted from PyPI (deleted files no longer appear, but their names can never be reused);
+- the sources disagree, or PyPI returns errors.
 
 ### 7.3 Decide using this table
 
 | PyPI state for the target version | Allowed action |
 |:--|:--|
-| Neither distribution exists (confirmed: JSON API 404, no files listed, no upload in the job log) | Correct the problem. Tag recovery may be considered (section 7.4). |
+| Neither distribution exists, **fully confirmed**: all five "no upload" conditions in section 7.2 hold | Correct the problem. Tag recovery may be considered (section 7.4). |
 | Only the wheel exists | The version is consumed: use a new version (section 7.5). |
 | Only the sdist exists | The version is consumed: use a new version (section 7.5). |
 | Both exist | Publication succeeded. Do the post-publication verification (section 6). |
-| Status uncertain | Stop and investigate. Do not delete tags, re-run `publish-to-pypi` or bump the version until the state is known. |
+| Status uncertain: any "no upload" condition fails or cannot be checked. This includes upload evidence in any earlier attempt, a missing or inconclusive log, a known deletion, or conflicting sources, even when PyPI returns 404 | Stop and investigate. Do not delete tags, re-run `publish-to-pypi` or bump the version until the state is known. Tag recovery is **not** permitted. |
+
+A 404 from the latest JSON API check is never enough on its own to choose the first row.
 
 If **either** the wheel or the sdist exists for a version, that version is consumed. Never attempt to upload the missing file, whether with `twine upload`, by re-running `publish-to-pypi`, or by pushing the same tag again. Never reuse the version number.
 
