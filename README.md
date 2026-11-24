@@ -198,6 +198,10 @@ Quality gate: FAIL
 - Missing true pairs, optionally written to a TSV.
 - Reduction ratio when source dataset sizes are known.
 - Exit-code quality gates for recall, maximum pair count, and duplicate rows.
+- **Record coverage against supplied totals** (diagnostic). With `--left-records` / `--right-records`, the report also shows how many records on each side have no candidates, and what fraction are covered.
+- **Degree analysis** (diagnostic). Distributions of unique candidate pairs per record: source and target separately in cross-linkage, all records in dedupe. Each gives min, P50/P95/P99/P99.9, mean, max, the Gini coefficient and the top-1% candidate share, plus the target/source mean-degree ratio. When totals are supplied, zero-degree records are included.
+
+The advanced diagnostics are additive (schema `1.0` unchanged) and never affect the quality gate. Record totals give counts of records without candidates, not their IDs. See [`docs/advanced-metrics.md`](docs/advanced-metrics.md) for exact definitions, null cases, and measured overhead.
 
 Candidate recall is a **ceiling on pair recall for downstream models**, not the final entity-resolution score. Reduction ratio and candidate recall should be interpreted together. High recall alone can be achieved by generating nearly every possible pair, which may be too expensive.
 
@@ -208,7 +212,7 @@ Candidate recall is a **ceiling on pair recall for downstream models**, not the 
 - Memory usage is disk-backed but peak resident memory increases with dataset size (from ~45 MB at 100k rows to ~419 MB at 10M rows in isolated child processes); it is not an $\mathcal{O}(1)$ constant-memory guarantee.
 - The truth file must represent known matching pairs in the same left/right orientation as the candidate file for cross-dataset linkage (deduplication mode handles unordered pairs automatically).
 - This tool audits output pairs; it does not generate blocking rules or infer missing ground truth.
-- Missing left records with zero candidates cannot be enumerated without a separate full source-ID file; v0.1 reports only IDs represented in candidate output.
+- Records with zero candidates can be *counted* when `--left-records`/`--right-records` are supplied, but not *listed*. Listing their IDs requires a full record roster, which is not supported yet.
 - Candidate identifiers are compared as strings. Normalize identifier formatting consistently before running an audit.
 
 ## Development
