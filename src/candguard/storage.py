@@ -19,6 +19,26 @@ from .models import AuditError
 from .readers import CandidateReader
 
 
+def compute_nearest_rank_percentile(
+    conn: sqlite3.Connection,
+    total_sources: int,
+    percentile: float,
+) -> int:
+    """Return a nearest-rank percentile of per-left candidate counts from source_candidate_counts.
+
+    Directly queries the caller's connection without creating, mutating, or closing databases.
+    """
+    if total_sources <= 0:
+        return 0
+    rank = max(0, math.ceil(percentile * total_sources) - 1)
+    row = conn.execute(
+        "SELECT candidate_count FROM source_candidate_counts "
+        "ORDER BY candidate_count, left_id LIMIT 1 OFFSET ?",
+        (rank,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 class StorageEngine(Protocol):
     """Storage engine protocol for candidate-pair auditing."""
 
@@ -246,15 +266,7 @@ class SQLiteStorageEngine:
 
     def _percentile(self, total_sources: int, percentile: float) -> int:
         """Return a nearest-rank percentile of per-left candidate counts."""
-        if total_sources <= 0:
-            return 0
-        rank = max(0, math.ceil(percentile * total_sources) - 1)
-        row = self.connection.execute(
-            "SELECT candidate_count FROM source_candidate_counts "
-            "ORDER BY candidate_count, left_id LIMIT 1 OFFSET ?",
-            (rank,),
-        ).fetchone()
-        return int(row[0]) if row else 0
+        return compute_nearest_rank_percentile(self.connection, total_sources, percentile)
 
     def evaluate_ground_truth(
         self,
