@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, Union
 
 
 class AuditError(ValueError):
@@ -25,6 +25,60 @@ class CoverageReport(TypedDict, total=False):
     left_records_represented: int
     right_records_represented: int
     records_represented: int
+    # Record-universe coverage (schema 1.0 additive extension). Present in every new report;
+    # None when the corresponding --left-records/--right-records total was not supplied.
+    # Cross-linkage fields:
+    left_records_total: int | None
+    right_records_total: int | None
+    left_records_without_candidates: int | None
+    right_records_without_candidates: int | None
+    left_record_coverage: float | None
+    right_record_coverage: float | None
+    # Deduplication fields:
+    records_total: int | None
+    records_without_candidates: int | None
+    record_coverage: float | None
+
+
+StatisticsBasis = Literal["record_universe", "represented_records"]
+
+
+class DegreeDistributionReport(TypedDict):
+    """Degree distribution over unique candidate pairs (schema 1.0 additive extension).
+
+    All statistics are None when the statistical population is empty; ``gini_coefficient``
+    and ``top_1_percent_candidate_share`` are None when the total degree is zero.
+    """
+
+    statistics_basis: StatisticsBasis
+    records_in_universe: int | None
+    records_with_candidates: int
+    records_without_candidates: int | None
+    total_degree: int
+    min: int | None
+    p50: int | None
+    p95: int | None
+    p99: int | None
+    p99_9: int | None
+    mean: float | None
+    max: int | None
+    gini_coefficient: float | None
+    top_1_percent_candidate_share: float | None
+
+
+class CrossDegreeAnalysisReport(TypedDict):
+    linkage_type: Literal["cross"]
+    left: DegreeDistributionReport
+    right: DegreeDistributionReport
+    right_to_left_mean_degree_ratio: float | None
+
+
+class DedupeDegreeAnalysisReport(TypedDict):
+    linkage_type: Literal["dedupe"]
+    records: DegreeDistributionReport
+
+
+DegreeAnalysisReport = Union[CrossDegreeAnalysisReport, DedupeDegreeAnalysisReport]
 
 
 class DistributionReport(TypedDict):
@@ -66,6 +120,8 @@ class AuditReport(TypedDict):
     inputs: InputsReport
     coverage: CoverageReport
     candidate_distribution_per_left_record: DistributionReport
+    # Schema 1.0 additive extension; absent from reports produced by earlier versions.
+    degree_analysis: DegreeAnalysisReport
     efficiency: EfficiencyReport
     ground_truth: GroundTruthReport | None
     quality_gate: QualityGateReport

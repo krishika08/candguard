@@ -156,6 +156,9 @@ The `SQLiteStorageEngine` manages local persistence:
 Subsequent v0.2.x releases will introduce advanced graph and distribution metrics without altering the JSON schema 1.0 contract:
 
 ### 6.1 Bipartite Degree Skew & Hub Detection
+
+**Status: implemented** as the additive `degree_analysis` report section and the record-universe `coverage` fields. `SQLiteStorageEngine.compute_degree_analysis()` reuses the existing per-record degree table and, for cross-linkage, adds a `target_candidate_counts` table. Each distribution is summarized from an ordered SQL histogram of `(degree, record_count)` rows, so only one row per distinct degree value reaches Python. Definitions, null cases and measurements are in `docs/advanced-metrics.md`. The original proposal follows.
+
 - **Left/Right Degree Asymmetry:** In cross-linkage, high candidate degree on the right (target) side can indicate uninformative generic records (e.g. placeholder addresses or missing entity names).
 - **Hub Metric:** Calculate the Gini coefficient or 99th-percentile concentration of candidates across target records.
 
@@ -164,6 +167,9 @@ Subsequent v0.2.x releases will introduce advanced graph and distribution metric
 - Evaluating connected component count, maximum component size, and density allows teams to detect "hairball" clusters before running costly entity clustering algorithms.
 
 ### 6.3 Isolated Record Enumeration
+
+*Partially addressed:* when totals are supplied, the number of records without candidates is now reported (`*_records_without_candidates`, `*_record_coverage`). Enumerating their IDs still requires a roster and remains future work.
+
 - Currently, records with zero candidates cannot be measured without a complete roster of input record IDs.
 - Future `--source-roster` or `--left-roster` options will compute true blocking coverage:
   $$\text{Coverage}_{\text{isolated}} = \frac{|\text{Source Records with } \ge 1 \text{ Candidate}|}{|\text{Total Source Records}|}$$
@@ -210,7 +216,7 @@ The reporting layer cleanly separates metric calculation from presentation:
 
 ### Schema Versioning Policy:
 - The current contract is `schema_version = "1.0"`.
-- Backward-compatible additions (e.g. optional drift metrics or rule summaries) will be versioned as `1.x`. Consumers expecting schema 1.0 will continue parsing without breaking changes.
+- Backward-compatible additions of optional fields or sections may ship under `schema_version = "1.0"`, as the v0.2.x degree and coverage diagnostics do (Section 6). Consumers must ignore unknown fields and treat fields added after the initial 1.0 contract as optional. A `1.x` minor version is reserved for additive changes that alter how existing consumers should interpret a report; `candguard compare` accepts any `1.x`.
 - Breaking schema modifications (e.g. renaming fields or modifying metric types) require a major version bump (`2.0`) and a multi-minor deprecation cycle.
 
 ---

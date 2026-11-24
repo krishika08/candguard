@@ -59,9 +59,89 @@ def render_text(report: dict[str, Any]) -> str:
         ]
         if truth.get("missed_pairs_file"):
             lines.append(f"Missing pairs written to:        {truth['missed_pairs_file']}")
+    degree = report.get("degree_analysis")
+    if degree is not None:
+        lines += _render_degree_analysis(degree, coverage)
     lines += ["", f"Quality gate: {'PASS' if gate['passed'] else 'FAIL'}"]
     lines.extend(f"  - {failure}" for failure in gate["failures"])
     return "\n".join(lines)
+
+
+def _fmt(value: Any, kind: str = "int") -> str:
+    if value is None:
+        return "n/a"
+    if kind == "pct":
+        return f"{value:.4%}"
+    if kind == "float":
+        return f"{value:.4f}"
+    return f"{value:,}"
+
+
+def _row(label: str, *values: str) -> str:
+    if len(values) == 1:
+        return f"{label:<33}{values[0]}"
+    return f"{label:<33}" + "".join(f"{v:<18}" for v in values).rstrip()
+
+
+def _distribution_rows(*dists: dict[str, Any]) -> list[str]:
+    def col(key: str, kind: str = "int") -> list[str]:
+        return [_fmt(d[key], kind) for d in dists]
+
+    def joined(*keys: str) -> list[str]:
+        return [" / ".join(_fmt(d[k], "float" if k == "mean" else "int") for k in keys) for d in dists]
+
+    return [
+        _row("Min / P50 / mean:", *joined("min", "p50", "mean")),
+        _row("P95 / P99 / P99.9 / max:", *joined("p95", "p99", "p99_9", "max")),
+        _row("Gini coefficient:", *col("gini_coefficient", "float")),
+        _row("Top 1% candidate share:", *col("top_1_percent_candidate_share", "pct")),
+    ]
+
+
+def _render_degree_analysis(degree: dict[str, Any], coverage: dict[str, Any]) -> list[str]:
+    """Render the advanced coverage and degree diagnostics block."""
+    if degree.get("linkage_type") == "dedupe":
+        dist = degree["records"]
+        title = "Advanced degree diagnostics (unique pairs per record, both endpoints)"
+        lines = ["", title, "-" * len(title)]
+        if dist["records_in_universe"] is not None:
+            lines.append(_row(
+                "Record coverage:",
+                f"{_fmt(coverage.get('record_coverage'), 'pct')} "
+                f"({dist['records_with_candidates']:,} of {dist['records_in_universe']:,} records; "
+                f"{dist['records_without_candidates']:,} without candidates)",
+            ))
+        else:
+            lines.append(_row("Record coverage:", "n/a (record total not supplied)"))
+        lines += _distribution_rows(dist)
+        if dist["statistics_basis"] == "represented_records":
+            lines.append(
+                "Note: --left-records not supplied; statistics cover only records represented in candidate output."
+            )
+        return lines
+
+    left, right = degree["left"], degree["right"]
+    title = "Advanced degree diagnostics (unique pairs per record)"
+    lines = [
+        "",
+        title,
+        "-" * len(title),
+        _row("", "Source", "Target"),
+        _row("Record coverage:", _fmt(coverage.get("left_record_coverage"), "pct"), _fmt(coverage.get("right_record_coverage"), "pct")),
+        _row(
+            "Records without candidates:",
+            _fmt(left["records_without_candidates"]),
+            _fmt(right["records_without_candidates"]),
+        ),
+    ]
+    lines += _distribution_rows(left, right)
+    lines.append(_row("Target/source mean degree ratio:", _fmt(degree["right_to_left_mean_degree_ratio"], "float")))
+    if left["statistics_basis"] == "represented_records" or right["statistics_basis"] == "represented_records":
+        lines.append(
+            "Note: --left-records/--right-records not supplied; statistics cover only records "
+            "represented in candidate output."
+        )
+    return lines
 
 
 def render_compare_text(report: dict[str, Any]) -> str:

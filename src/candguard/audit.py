@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import __version__
-from .metrics import compute_possible_pairs, compute_reduction_ratio
+from .metrics import compute_possible_pairs, compute_record_coverage, compute_reduction_ratio
 from .models import AuditError, validate_audit_arguments
 from .readers import CandidateReader, DelimitedReader, get_reader, resolve_delimiter
 from .reporting import render_text, report_json
@@ -174,6 +174,15 @@ def audit_candidates(
                 possible_pairs=possible_pairs,
             )
 
+        # Additive diagnostics (schema 1.0 extension). Totals were validated above, so these
+        # never see represented counts larger than the supplied record totals.
+        coverage.update(compute_record_coverage(linkage_type, coverage, left_records, right_records))
+        degree_analysis = engine.compute_degree_analysis(
+            linkage_type,
+            left_records=left_records,
+            right_records=right_records if linkage_type == "cross" else None,
+        )
+
         ground_truth: dict[str, Any] | None = None
         if truth_file is not None and truth_reader is not None:
             truth_rows, truth_unique = engine.ingest_truth(truth_reader, linkage_type=linkage_type)
@@ -226,6 +235,7 @@ def audit_candidates(
             },
             "coverage": coverage,
             "candidate_distribution_per_left_record": distribution,
+            "degree_analysis": degree_analysis,
             "efficiency": efficiency,
             "ground_truth": ground_truth,
             "quality_gate": {"passed": not failures, "failures": failures},

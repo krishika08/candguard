@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
-from .metrics import compute_truth_fingerprint_v2
+from .metrics import compute_mean_degree_ratio, compute_truth_fingerprint_v2, summarize_degree_histogram
 from .models import AuditError
 from .readers import CandidateReader
 
@@ -263,6 +263,76 @@ class SQLiteStorageEngine:
             return coverage, distribution
         except sqlite3.Error as exc:
             raise AuditError(f"SQLite failed while computing coverage metrics: {exc}") from exc
+
+    def _summarize_degree_table(self, table: str, universe_records: int | None) -> dict[str, Any]:
+        """Summarize a ``(<id>, candidate_count)`` degree table via an ordered SQL histogram.
+
+        Only aggregate rows ``(degree, record_count)`` are streamed to Python, one distinct
+        degree at a time; record IDs and per-record degrees are never fetched.
+        """
+        conn = self.connection
+        represented, total_degree = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(candidate_count), 0) FROM {table}"
+        ).fetchone()
+        histogram = conn.execute(
+            f"SELECT candidate_count, COUNT(*) FROM {table} GROUP BY candidate_count ORDER BY candidate_count"
+        )
+        try:
+            return summarize_degree_histogram(
+                histogram,
+                represented_records=int(represented),
+                total_degree=int(total_degree),
+                universe_records=universe_records,
+            )
+        finally:
+            # Finalize the statement even if summarizing fails part-way. An unfinalized statement
+            # kept alive by a traceback defers the real connection close, which on Windows keeps
+            # the temporary database file open and prevents its removal.
+            histogram.close()
+
+    def compute_degree_analysis(
+        self,
+        linkage_type: str,
+        left_records: int | None = None,
+        right_records: int | None = None,
+    ) -> dict[str, Any]:
+        """Compute degree distributions, skew, and concentration over unique candidate pairs.
+
+        Must be called after ``compute_coverage_and_distribution()``, which builds the
+        per-record degree table reused here. Degrees count unique pairs only, so duplicate
+        raw candidate rows never add degree.
+
+        - cross: independent distributions for left/source and right/target records, plus
+          ``right_to_left_mean_degree_ratio``. ``left_records``/``right_records`` add the
+          corresponding zero-degree records to each distribution.
+        - dedupe: one undirected distribution over all records (both endpoints of every
+          unique pair). ``left_records`` is the total record count.
+        """
+        conn = self.connection
+        try:
+            if linkage_type == "dedupe":
+                return {
+                    "linkage_type": "dedupe",
+                    "records": self._summarize_degree_table("source_candidate_counts", left_records),
+                }
+
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS target_candidate_counts AS "
+                "SELECT right_id, COUNT(*) AS candidate_count FROM candidate_pairs GROUP BY right_id"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_target_counts ON target_candidate_counts(candidate_count, right_id)"
+            )
+            left = self._summarize_degree_table("source_candidate_counts", left_records)
+            right = self._summarize_degree_table("target_candidate_counts", right_records)
+            return {
+                "linkage_type": "cross",
+                "left": left,
+                "right": right,
+                "right_to_left_mean_degree_ratio": compute_mean_degree_ratio(left, right),
+            }
+        except sqlite3.Error as exc:
+            raise AuditError(f"SQLite failed while computing degree analysis: {exc}") from exc
 
     def _percentile(self, total_sources: int, percentile: float) -> int:
         """Return a nearest-rank percentile of per-left candidate counts."""
