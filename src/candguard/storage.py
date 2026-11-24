@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
+from .candidate_set import write_candidate_set_artifact
 from .metrics import compute_mean_degree_ratio, compute_truth_fingerprint_v2, summarize_degree_histogram
 from .models import AuditError
 from .readers import CandidateReader
@@ -382,3 +383,34 @@ class SQLiteStorageEngine:
             raise AuditError(f"Could not write missed pairs to {out_path}: {exc}") from exc
         except sqlite3.Error as exc:
             raise AuditError(f"SQLite failed while exporting missed pairs: {exc}") from exc
+
+    def export_candidate_set(
+        self,
+        out_path: Path,
+        linkage_type: str,
+        expected_pairs: int,
+    ) -> dict[str, Any]:
+        """Atomically export the unique normalized candidate pairs as a sorted TSV sidecar.
+
+        Reads the deduplicated ``candidate_pairs`` table (canonical ``(min, max)`` pairs in
+        dedupe mode, directional pairs in cross mode) in ``left_id, right_id`` BINARY order via
+        its unique index, streaming rows from the cursor. Returns the ``candidate_set`` report
+        metadata (format, pair count, fingerprint, fingerprint version, linkage type).
+        """
+        conn = self.connection
+        try:
+            cursor = conn.execute(
+                "SELECT left_id, right_id FROM candidate_pairs "
+                "ORDER BY left_id COLLATE BINARY, right_id COLLATE BINARY"
+            )
+        except sqlite3.Error as exc:
+            raise AuditError(f"SQLite failed while exporting the candidate set: {exc}") from exc
+        try:
+            return write_candidate_set_artifact(
+                cursor, out_path, linkage_type=linkage_type, expected_pairs=expected_pairs
+            )
+        except sqlite3.Error as exc:
+            raise AuditError(f"SQLite failed while exporting the candidate set: {exc}") from exc
+        finally:
+            # Finalize the statement so a failure cannot keep the temporary database open.
+            cursor.close()

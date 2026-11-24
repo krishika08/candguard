@@ -102,6 +102,7 @@ The v0.2.0 architecture decouples CandGuard into single-responsibility component
 | `candguard.reporting`| Transformation of metric models into user-facing text and JSON outputs | `render_text`, `render_compare_text`, `report_json` |
 | `candguard.audit` | High-level audit workflow coordination and backward-compatible entry point | `audit_candidates()`, legacy aliases |
 | `candguard.compare`| Report comparison, threshold validation, regression quality gate evaluation | `compare_reports()`, legacy aliases |
+| `candguard.candidate_set`| Candidate-set sidecar format, atomic export, artifact validation, streaming sorted merge | `write_candidate_set_artifact()`, `CandidateSetArtifactReader`, `merge_sorted_pair_streams()` |
 | `candguard.cli` | Argument parsing, help documentation, formatting dispatch, exit code mapping | `build_parser()`, `main()` |
 | `candguard.__init__`| Top-level package namespace exporting public contracts | `__version__`, `audit_candidates`, `compare_reports`, `AuditError` |
 
@@ -168,11 +169,11 @@ Subsequent v0.2.x releases will introduce advanced graph and distribution metric
 
 ### 6.3 Isolated Record Enumeration
 
-*Partially addressed:* when totals are supplied, the number of records without candidates is now reported (`*_records_without_candidates`, `*_record_coverage`). Enumerating their IDs still requires a roster and remains future work.
+*Partially addressed:* records without candidates can be **counted** when `--left-records` / `--right-records` totals are supplied: the report gives `*_records_without_candidates` and the coverage ratio below as `*_record_coverage`. Their **IDs cannot be enumerated** without a complete roster of input record IDs. Roster ingestion and isolated-ID export remain future work.
 
-- Currently, records with zero candidates cannot be measured without a complete roster of input record IDs.
-- Future `--source-roster` or `--left-roster` options will compute true blocking coverage:
-  $$\text{Coverage}_{\text{isolated}} = \frac{|\text{Source Records with } \ge 1 \text{ Candidate}|}{|\text{Total Source Records}|}$$
+- Coverage against supplied totals:
+  $$\text{Coverage} = \frac{|\text{Source Records with } \ge 1 \text{ Candidate}|}{|\text{Total Source Records}|}$$
+- Future `--source-roster` or `--left-roster` options would list the isolated IDs and validate the supplied totals.
 
 ---
 
@@ -180,14 +181,30 @@ Subsequent v0.2.x releases will introduce advanced graph and distribution metric
 
 Candidate generation regressions are not limited to aggregate recall drops and pair volume growth. Pipeline modifications (e.g. changing BM25 tokens, altering embedding distance thresholds) can cause significant **churn** in the generated candidate set while keeping total counts identical.
 
-### Proposed Architecture for Drift Detection:
+*Implemented in v0.2.x.* See [`candidate-set-drift.md`](candidate-set-drift.md) for the user-facing contract.
+
+### Metrics
 1. **Jaccard Similarity of Candidate Sets:**
    $$J(C_{\text{base}}, C_{\text{curr}}) = \frac{|C_{\text{base}} \cap C_{\text{curr}}|}{|C_{\text{base}} \cup C_{\text{curr}}|}$$
-2. **Directional Churn Ratios:**
-   - **Pruned Candidates:** Pairs present in baseline but missing in current: $C_{\text{base}} \setminus C_{\text{curr}}$.
-   - **Novel Candidates:** Pairs introduced in current but absent in baseline: $C_{\text{curr}} \setminus C_{\text{base}}$.
-3. **Storage-Efficient Evaluation:**
-   - In `candguard compare`, when both audit runs produce intermediate SQLite databases or sorted digest files, a stream-merge difference identifies churn without loading pair sets into memory.
+   This is defined as 1 when both sets are empty. Pair churn is $(A + D)/U = 1 - J$.
+2. **Directional Ratios:**
+   - **Removed pairs** $D = |C_{\text{base}} \setminus C_{\text{curr}}|$; reported as `removed_fraction_of_baseline` $= D / |C_{\text{base}}|$.
+   - **Added pairs** $A = |C_{\text{curr}} \setminus C_{\text{base}}|$; reported as `added_fraction_of_current` $= A / |C_{\text{curr}}|$.
+
+### Workflow and Storage Design
+1. **Sidecar export (audit).** `audit_candidates(candidate_set_path=...)` / `--candidate-set-out` runs after every other audit step has succeeded. It streams the deduplicated `candidate_pairs` table from the audit's SQLite database in `ORDER BY left_id COLLATE BINARY, right_id COLLATE BINARY` order (an index scan) into a `candguard-pairs-tsv-v1` file:
+   - the export never re-reads the original candidate file;
+   - the file is written to a temporary file in the destination directory and atomically renamed;
+   - cross pairs keep their direction, and dedupe pairs are the existing canonical `(min, max)` edges.
+2. **Report metadata.** The audit report records only `candidate_set = {format, unique_pairs, fingerprint, fingerprint_version, linkage_type}`. The sidecar path and the pairs themselves stay out of the JSON.
+3. **Fingerprint.** `candidate-set:v1` is a domain-separated, length-prefixed SHA-256 over the sorted pairs, the same encoding as the ground-truth `v2` fingerprint but in a different domain. It serves as an integrity check that binds each sidecar to its report.
+4. **Streaming merge (compare).** `compare_reports(baseline_candidate_set_path=..., current_candidate_set_path=...)` opens one `CandidateSetArtifactReader` per sidecar. Each reader:
+   - validates the header, field count, non-empty IDs, strict ascending order (which also rejects duplicates) and dedupe canonical form, row by row;
+   - stops as soon as a file holds more pairs than its report records;
+   - verifies the pair count and fingerprint when the file ends.
+
+   `merge_sorted_pair_streams()` holds at most one pair per side and drains both readers. Python's code-point string order matches SQLite `BINARY` order over UTF-8, so the producer and consumer agree on ordering. No temporary files are used, and no pair set is materialized.
+5. **Gate.** The optional `min_candidate_jaccard` threshold, in [0, 1], fails the gate when the unrounded R/U is below it. Without the threshold, drift is diagnostic only. Without sidecar paths, compare output is byte-for-byte unchanged.
 
 ---
 
@@ -211,7 +228,7 @@ In production record linkage, candidates are typically produced by a union of di
 
 The reporting layer cleanly separates metric calculation from presentation:
 - `render_text()`: Formats human-readable CLI summaries with distinct semantics for cross-linkage vs. deduplication.
-- `render_compare_text()`: Formats side-by-side delta summaries with percentage growth and threshold fail reasons.
+- `render_compare_text()`: Formats side-by-side delta summaries with percentage growth and threshold fail reasons, plus a candidate-set drift section when sidecar artifacts were compared.
 - `report_json()`: Serializes deterministic, machine-readable JSON matching the published schema.
 
 ### Schema Versioning Policy:

@@ -275,3 +275,86 @@ def compute_relative_growth(base: int, curr: int) -> float:
     if base == 0:
         return 0.0 if curr == 0 else float("inf")
     return (curr - base) / base
+
+
+#: Version tag recorded as ``candidate_set.fingerprint_version`` in audit reports.
+CANDIDATE_SET_FINGERPRINT_VERSION = "v1"
+
+
+class CandidateSetFingerprintV1:
+    """Incremental SHA-256 fingerprint of a canonical, sorted, unique candidate-pair set.
+
+    Domain-separated by the prefix ``candguard:candidate-set:v1:<linkage_type>`` plus a newline,
+    so a candidate-set digest can never collide with a ground-truth digest or with a set of the
+    other linkage type. Each pair is encoded unambiguously as ``<len>:<left>``, a tab,
+    ``<len>:<right>`` and a newline, where ``<len>`` is the decimal UTF-8 byte length, so
+    identifiers containing tabs, newlines or digits cannot be confused with the separators.
+    The digest depends on pair order; callers feed pairs in canonical ascending
+    ``(left_id, right_id)`` order. ``count`` tracks the number of pairs hashed.
+    """
+
+    def __init__(self, linkage_type: str) -> None:
+        if linkage_type not in {"cross", "dedupe"}:
+            raise AuditError(f"linkage_type must be 'cross' or 'dedupe', got {linkage_type!r}.")
+        self._hasher = hashlib.sha256()
+        self._hasher.update(f"candguard:candidate-set:v1:{linkage_type}\n".encode("utf-8"))
+        self.count = 0
+
+    def update(self, left: str, right: str) -> None:
+        l_bytes = left.encode("utf-8")
+        r_bytes = right.encode("utf-8")
+        self._hasher.update(
+            b"%d:%b\t%d:%b\n" % (len(l_bytes), l_bytes, len(r_bytes), r_bytes)
+        )
+        self.count += 1
+
+    def hexdigest(self) -> str:
+        return f"sha256:{self._hasher.hexdigest()}"
+
+
+def compute_candidate_set_fingerprint_v1(
+    pairs: Iterable[tuple[str, str]],
+    linkage_type: str,
+) -> str:
+    """Return the v1 candidate-set fingerprint of ``pairs`` (canonical sorted unique pairs).
+
+    This is an integrity check for candidate-set artifacts, not a substitute for comparing the
+    sets themselves. ``compute_truth_fingerprint_v2`` is unrelated and unchanged.
+    """
+    hasher = CandidateSetFingerprintV1(linkage_type)
+    for left, right in pairs:
+        hasher.update(left, right)
+    return hasher.hexdigest()
+
+
+def compute_candidate_set_drift(*, retained: int, added: int, removed: int) -> dict[str, int | float | None]:
+    """Return candidate-set drift metrics from exact retained/added/removed unique-pair counts.
+
+    With B the baseline set, C the current set, R = |B ∩ C|, A = |C − B|, D = |B − C| and
+    U = |B ∪ C| = R + A + D:
+
+    - ``jaccard_similarity`` = R / U, defined as 1.0 when both sets are empty;
+    - ``pair_churn`` = (A + D) / U, defined as 0.0 when both sets are empty;
+    - ``removed_fraction_of_baseline`` = D / |B|, None when the baseline set is empty;
+    - ``added_fraction_of_current`` = A / |C|, None when the current set is empty.
+
+    Fractions are rounded independently to METRIC_PRECISION decimal places.
+    """
+    for name, value in (("retained", retained), ("added", added), ("removed", removed)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AuditError(f"{name} pair count must be a non-negative integer, got {value!r}.")
+    baseline = retained + removed
+    current = retained + added
+    union = retained + added + removed
+    return {
+        "baseline_unique_pairs": baseline,
+        "current_unique_pairs": current,
+        "retained_pairs": retained,
+        "added_pairs": added,
+        "removed_pairs": removed,
+        "union_pairs": union,
+        "jaccard_similarity": _round(retained / union) if union else 1.0,
+        "pair_churn": _round((added + removed) / union) if union else 0.0,
+        "removed_fraction_of_baseline": compute_ratio(removed, baseline),
+        "added_fraction_of_current": compute_ratio(added, current),
+    }

@@ -170,11 +170,35 @@ Quality gate: FAIL
 - **Duplicate growth (`--max-duplicate-growth`):** Fractional duplicate candidate row growth: `(current - baseline) / baseline`.
 - **Ground-truth comparability:** Recall comparisons verify that both reports used the exact same ground-truth dataset via an unambiguous length-prefixed serialization and SHA-256 fingerprint (`sha256:...`). Reports record an explicit `fingerprint_version` (current: `v2`). If ground-truth fingerprints differ, fingerprint versions are incompatible (e.g. `v1` vs `v2`), or fingerprints are missing, recall comparison fails safely with exit code 2. Pair-count-only and duplicate-growth-only comparisons do not require ground-truth comparability.
 
+### Candidate-set drift
+
+Counts and recall can stay identical while a blocking change replaces most candidate pairs. To compare the actual candidate sets, export a sorted sidecar of unique pairs during each audit. Then pass both sidecars to `compare`:
+
+```bash
+candguard audit --candidates base_candidates.tsv --left-id source_id --right-id candidate_id \
+  --candidate-set-out artifacts/baseline.pairs.tsv --format json --output reports/baseline.json
+candguard audit --candidates pr_candidates.tsv --left-id source_id --right-id candidate_id \
+  --candidate-set-out artifacts/current.pairs.tsv --format json --output reports/current.json
+
+candguard compare \
+  --baseline reports/baseline.json --current reports/current.json \
+  --baseline-candidate-set artifacts/baseline.pairs.tsv \
+  --current-candidate-set artifacts/current.pairs.tsv \
+  --min-candidate-jaccard 0.90
+```
+
+`compare` verifies each sidecar's header, sort order, pair count and SHA-256 fingerprint against its report. It then merges the two files in one streaming pass and reports these, all on unique pairs:
+- retained, removed and added pairs;
+- Jaccard similarity and pair churn;
+- the removed fraction of the baseline and the added fraction of the current set.
+
+`--min-candidate-jaccard` is optional. Without it, drift is diagnostic only. Cross-linkage pairs keep their direction; dedupe pairs are undirected. See [`docs/candidate-set-drift.md`](docs/candidate-set-drift.md) for the sidecar format, definitions, a CI workflow, measured performance and limitations.
+
 ### Compare exit codes
 
 - `0`: Valid comparison; all configured regression gates passed (or no gates were configured).
-- `1`: One or more regression gates failed.
-- `2`: Invalid input, malformed JSON, unsupported schema versions, incompatible linkage types, mismatched ground-truth datasets, or I/O errors.
+- `1`: One or more regression gates failed (including `--min-candidate-jaccard`).
+- `2`: Invalid input, malformed JSON, unsupported schema versions, incompatible linkage types, mismatched ground-truth datasets, missing or unverifiable candidate-set artifacts, or I/O errors.
 
 ### Minimal CI example (GitHub Actions)
 
@@ -200,6 +224,8 @@ Quality gate: FAIL
 - Exit-code quality gates for recall, maximum pair count, and duplicate rows.
 - **Record coverage against supplied totals** (diagnostic). With `--left-records` / `--right-records`, the report also shows how many records on each side have no candidates, and what fraction are covered.
 - **Degree analysis** (diagnostic). Distributions of unique candidate pairs per record: source and target separately in cross-linkage, all records in dedupe. Each gives min, P50/P95/P99/P99.9, mean, max, the Gini coefficient and the top-1% candidate share, plus the target/source mean-degree ratio. When totals are supplied, zero-degree records are included.
+
+- **Candidate-set drift** (`compare`, opt-in). Exact retained/removed/added unique pairs, Jaccard similarity and churn between two audits' candidate-set sidecars, with an optional minimum-Jaccard gate.
 
 The advanced diagnostics are additive (schema `1.0` unchanged) and never affect the quality gate. Record totals give counts of records without candidates, not their IDs. See [`docs/advanced-metrics.md`](docs/advanced-metrics.md) for exact definitions, null cases, and measured overhead.
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .audit import AuditError, audit_candidates, render_text, report_json
+from .candidate_set import same_path
 from .compare import compare_reports, render_compare_text
 
 
@@ -40,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--max-pairs", type=int, help="Fail the quality gate if unique candidate-pair count exceeds this value")
     audit.add_argument("--max-duplicate-rows", type=int, help="Fail the quality gate if duplicate candidate rows exceed this value")
     audit.add_argument("--missed-pairs-out", help="Write all ground-truth pairs missing from candidates to this TSV file")
+    audit.add_argument(
+        "--candidate-set-out",
+        help="Export the unique normalized candidate pairs to this sorted TSV sidecar (candguard-pairs-tsv-v1) "
+        "for candidate-set drift comparison",
+    )
     audit.add_argument("--format", choices=["text", "json"], default="text", help="Report format")
     audit.add_argument("--output", help="Write the report to this path instead of stdout")
 
@@ -54,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--max-recall-drop", type=float, help="Fail gate if candidate recall drop exceeds this absolute amount")
     compare.add_argument("--max-pair-growth", type=float, help="Fail gate if raw candidate row count grows beyond this ratio")
     compare.add_argument("--max-duplicate-growth", type=float, help="Fail gate if duplicate row count grows beyond this ratio")
+    compare.add_argument("--baseline-candidate-set", help="Baseline candidate-set sidecar written by audit --candidate-set-out")
+    compare.add_argument("--current-candidate-set", help="Current candidate-set sidecar written by audit --candidate-set-out")
+    compare.add_argument(
+        "--min-candidate-jaccard",
+        type=float,
+        help="Fail gate if candidate-set Jaccard similarity is below this value (requires both candidate-set artifacts)",
+    )
     compare.add_argument("--format", choices=["text", "json"], default="text", help="Report format")
     compare.add_argument("--output", help="Write the report to this path instead of stdout")
 
@@ -66,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "audit":
+            if args.candidate_set_out and args.output and same_path(args.candidate_set_out, args.output):
+                raise AuditError(
+                    f"--candidate-set-out ({args.candidate_set_out}) and --output ({args.output}) "
+                    "must be different files."
+                )
             report = audit_candidates(
                 candidates_path=args.candidates,
                 left_id=args.left_id,
@@ -82,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_pairs=args.max_pairs,
                 max_duplicate_rows=args.max_duplicate_rows,
                 missed_pairs_path=args.missed_pairs_out,
+                candidate_set_path=args.candidate_set_out,
             )
             rendered = report_json(report) if args.format == "json" else render_text(report)
         elif args.command == "compare":
@@ -91,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
                 max_recall_drop=args.max_recall_drop,
                 max_pair_growth=args.max_pair_growth,
                 max_duplicate_growth=args.max_duplicate_growth,
+                baseline_candidate_set_path=args.baseline_candidate_set,
+                current_candidate_set_path=args.current_candidate_set,
+                min_candidate_jaccard=args.min_candidate_jaccard,
             )
             rendered = report_json(report) if args.format == "json" else render_compare_text(report)
         else:
