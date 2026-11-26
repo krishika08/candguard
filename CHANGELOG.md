@@ -4,9 +4,7 @@ All notable changes to CandGuard are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and CandGuard uses [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] — not yet released
-
-The package version on `main` is `0.2.0`, but v0.2.0 has **not been tagged or published yet**. The latest release on PyPI is still 0.1.0, which does not include these changes. The release date will be added when v0.2.0 is published.
+## [0.2.0] — 2026-11-26
 
 ### Added
 
@@ -70,5 +68,5 @@ First published release on PyPI.
 - `candguard compare` regression checks: `--max-recall-drop`, `--max-pair-growth` and `--max-duplicate-growth`, with ground-truth fingerprint (`v2`) comparability checks.
 - Text and JSON reports (`schema_version` `"1.0"`), and CLI exit codes `0` (pass), `1` (quality gate failed) and `2` (invalid input or configuration).
 
-[0.2.0]: https://github.com/krishika08/candguard/compare/v0.1.0...main
+[0.2.0]: https://github.com/krishika08/candguard/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/krishika08/candguard/tree/v0.1.0
