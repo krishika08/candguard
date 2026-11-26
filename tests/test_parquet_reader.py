@@ -795,3 +795,101 @@ def test_cli_parquet_exit_codes_and_json_parity(
     text = capsys.readouterr().out
     assert "Candidate recall:                75.0000%" in text
     assert list(sqlite_tmp.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Invalid UTF-8 in string identifier columns
+# ---------------------------------------------------------------------------
+
+INVALID_UTF8 = [
+    pytest.param(b"\xff\xfe", id="invalid-start-byte"),
+    pytest.param(b"ok\xe2\x82", id="truncated-sequence"),
+    pytest.param(b"\xed\xa0\x80", id="encoded-surrogate"),
+]
+
+
+def _write_invalid_utf8_parquet(path: Path, values: list[bytes], *, side: str = "left", **write_kwargs: Any) -> Path:
+    """Write a Parquet file whose string identifier column stores the given raw bytes.
+
+    ``binary(...).view(string())`` relabels the bytes as an Arrow string column without UTF-8
+    validation, and ``write_table`` stores them as a Parquet UTF8 (string) column. Reading the
+    column back into Python makes PyArrow decode the bytes and raise UnicodeDecodeError, which
+    is exactly the path CandGuard must report as an AuditError.
+    """
+    bad = pa.array(values, type=pa.binary()).view(pa.string())
+    good = pa.array([f"x{i}" for i in range(len(values))], type=pa.string())
+    left, right = (bad, good) if side == "left" else (good, bad)
+    pq.write_table(pa.table({HEADER[0]: left, HEADER[1]: right}), path, **write_kwargs)
+    return path
+
+
+def _assert_pyarrow_cannot_decode(path: Path, column: str) -> None:
+    """Precondition: the fixture really triggers PyArrow's UTF-8 decoding failure."""
+    table = pq.read_table(path, columns=[column])
+    assert pa.types.is_string(table.schema.field(column).type)
+    with pytest.raises(UnicodeDecodeError):
+        table.column(column).to_pylist()
+
+
+@needs_pyarrow
+@pytest.mark.parametrize("bad", INVALID_UTF8)
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_invalid_utf8_identifier_is_rejected_with_column_and_row(tmp_path: Path, side: str, bad: bytes) -> None:
+    path = _write_invalid_utf8_parquet(tmp_path / "bad.parquet", [b"ok0", b"ok1", bad, b"ok3"], side=side)
+    column = HEADER[0] if side == "left" else HEADER[1]
+    _assert_pyarrow_cannot_decode(path, column)
+    with pytest.raises(
+        AuditError, match=rf"Invalid UTF-8 in string identifier column '{column}' at row 3 of Parquet file .*bad\.parquet"
+    ) as excinfo:
+        list(get_reader(path, *HEADER).iter_pairs())
+    assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+    assert "String identifier columns must contain valid UTF-8 text." in str(excinfo.value)
+
+
+@needs_pyarrow
+def test_invalid_utf8_reported_with_global_row_number_across_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = [f"s{i}".encode() for i in range(10)]
+    values[8] = b"\xff"
+    path = _write_invalid_utf8_parquet(tmp_path / "bad.parquet", values, row_group_size=3)
+    monkeypatch.setattr(ParquetReader, "read_rows", 2)
+    with pytest.raises(AuditError, match=r"column 'source_id' at row 9 of Parquet file"):
+        list(get_reader(path, *HEADER).iter_batches(batch_size=2))
+
+
+@needs_pyarrow
+@pytest.mark.parametrize("flag", ["--candidates", "--truth"])
+def test_cli_invalid_utf8_parquet_exits_2_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], sqlite_tmp: Path, flag: str
+) -> None:
+    bad = _write_invalid_utf8_parquet(tmp_path / "bad.parquet", [b"a", b"\xff\xfe"])
+    good = write_delimited(tmp_path / "good.tsv", [("a", "x0")], "\t")
+    candidates, truth = (bad, good) if flag == "--candidates" else (good, bad)
+    code = main(["audit", "--candidates", str(candidates), "--truth", str(truth), *(
+        "--left-id", HEADER[0], "--right-id", HEADER[1])])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.err.startswith(
+        f"candguard: error: Invalid UTF-8 in string identifier column '{HEADER[0]}' at row 2 of Parquet file {bad}"
+    )
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+    assert list(sqlite_tmp.iterdir()) == []  # the temporary database is removed on failure
+
+
+@needs_pyarrow
+def test_cli_subprocess_invalid_utf8_parquet_has_no_traceback(tmp_path: Path) -> None:
+    """End-to-end in a real interpreter: exit code 2 (not 1) and a single error line."""
+    bad = _write_invalid_utf8_parquet(tmp_path / "bad.parquet", [b"\xff\xfe"])
+    env = {**os.environ, "PYTHONPATH": str(SRC_ROOT)}
+    result = subprocess.run(
+        [sys.executable, "-m", "candguard", "audit", "--candidates", str(bad),
+         "--left-id", HEADER[0], "--right-id", HEADER[1]],
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert result.stderr.startswith("candguard: error: Invalid UTF-8 in string identifier column")
+    assert len(result.stderr.strip().splitlines()) == 1

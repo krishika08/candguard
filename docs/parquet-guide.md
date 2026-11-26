@@ -4,18 +4,18 @@ CandGuard can read candidate-pair and ground-truth files in Apache Parquet forma
 
 ## Installing
 
-> **Availability:** Parquet support is on the development branch and is planned for v0.2.0, which has not been released. The latest published release, **CandGuard 0.1.0, does not provide the `parquet` extra** and cannot read Parquet files.
+> **Availability:** Parquet support was added in CandGuard 0.2.0. **CandGuard 0.1.0 does not provide the `parquet` extra** and cannot read Parquet files.
 
-**From a source checkout** (the method that works today). Run this from the repository root:
-
-```bash
-python -m pip install -e ".[parquet]"
-```
-
-**From a published release that includes Parquet support.** This applies only once such a release is on PyPI, not to 0.1.0:
+**From a release that includes Parquet support (0.2.0 or later):**
 
 ```bash
 python -m pip install "candguard[parquet]"
+```
+
+**From a source checkout.** Run this from the repository root:
+
+```bash
+python -m pip install -e ".[parquet]"
 ```
 
 The `parquet` extra declares `pyarrow>=25.0.1` with no upper bound. pip chooses a PyArrow release whose `Requires-Python` metadata matches your interpreter:
@@ -135,6 +135,7 @@ Every error below gives exit code `2`.
 | `Unsupported Parquet type 'T' for identifier column ...` | Cast the column to string or integer. |
 | `Null identifier in column 'col' at X row N ...` | Fill or remove null IDs. |
 | `Empty identifier in column 'col' at X row N ...` | Fill or remove empty IDs. |
+| `Invalid UTF-8 in string identifier column 'col' at row N of Parquet file X ...` | A string identifier holds bytes that are not valid UTF-8 (some writers do not validate string columns). Re-encode the column as UTF-8, or store the identifiers as integers. |
 | `Could not read Parquet file X: ...` | The file is not Parquet, is truncated or corrupted, or cannot be read. The PyArrow error is included. |
 | `Input file does not exist: X` | Check the path. |
 | `Input path is not a file: X. Partitioned Parquet dataset directories are not supported ...` | Pass a single Parquet file, not a dataset directory. |

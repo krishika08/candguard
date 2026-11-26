@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "candguard"
-version = "0.1.0"
+version = "0.2.0"
 description = "A lightweight quality gate for entity-resolution candidate generation"
 readme = "README.md"
 requires-python = ">=3.10"

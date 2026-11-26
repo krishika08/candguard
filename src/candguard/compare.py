@@ -30,6 +30,9 @@ def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise AuditError(f"Could not read {label} file as UTF-8 text ({path}): {exc}") from exc
+    except OSError as exc:
+        # The file exists but cannot be opened or read (for example permission denied).
+        raise AuditError(f"Could not read {label} file ({path}): {exc}") from exc
 
     try:
         data = json.loads(content)

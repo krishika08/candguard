@@ -183,6 +183,9 @@ class DelimitedReader:
             raise AuditError(f"Could not read {self._path} as UTF-8 text: {exc}") from exc
         except csv.Error as exc:
             raise AuditError(f"Could not parse delimited file {self._path}: {exc}") from exc
+        except OSError as exc:
+            # Opening or reading failed (for example permission denied or an I/O error).
+            raise AuditError(f"Could not read input file {self._path}: {exc}") from exc
 
     def iter_batches(self, batch_size: int = 50_000) -> Iterator[list[tuple[str, str]]]:
         """Yield batches of pair tuples for bulk ingestion.
@@ -234,6 +237,31 @@ def _identifier_kind(pa: Any, arrow_type: Any) -> str | None:
     return None
 
 
+def _column_to_pylist(column: Any, *, path: Path, column_name: str, row_offset: int) -> list[Any]:
+    """Convert an Arrow column to Python values, reporting undecodable strings as AuditError.
+
+    Parquet string columns are not guaranteed to hold valid UTF-8 (some writers do not validate),
+    and PyArrow only decodes them when converting to Python, raising ``UnicodeDecodeError``.
+    On that failure the column is re-scanned value by value to name the first bad row; this
+    slower path runs only when the file is already known to be invalid.
+    """
+    try:
+        return column.to_pylist()
+    except UnicodeDecodeError as exc:
+        bad_row: int | None = None
+        for index in range(len(column)):
+            try:
+                column[index].as_py()
+            except UnicodeDecodeError:
+                bad_row = row_offset + index + 1
+                break
+        where = f" at row {bad_row}" if bad_row is not None else ""
+        raise AuditError(
+            f"Invalid UTF-8 in string identifier column '{column_name}'{where} of Parquet file {path}: {exc}. "
+            "String identifier columns must contain valid UTF-8 text."
+        ) from exc
+
+
 class ParquetReader:
     """Reader for Apache Parquet candidate-pair and ground-truth files.
 
@@ -252,6 +280,7 @@ class ParquetReader:
     - Integer columns (signed or unsigned, any width, or dictionary-encoded integers) are
       converted to base-10 text with ``str(int)``, e.g. ``42`` -> ``"42"``, ``-7`` -> ``"-7"``.
     - Null identifiers and identifiers that are empty after trimming are rejected.
+    - String values that are not valid UTF-8 are rejected, naming the column and row.
     - All other types (floats, booleans, binary, decimals, dates/timestamps, nested types)
       are rejected rather than silently stringified.
     """
@@ -337,8 +366,12 @@ class ParquetReader:
                             f"Could not project identifier columns '{left_col}' and '{right_col}' "
                             f"from {self._path}."
                         )
-                    lefts = record_batch.column(left_idx).to_pylist()
-                    rights = record_batch.column(right_idx).to_pylist()
+                    lefts = _column_to_pylist(
+                        record_batch.column(left_idx), path=self._path, column_name=left_col, row_offset=row_offset
+                    )
+                    rights = _column_to_pylist(
+                        record_batch.column(right_idx), path=self._path, column_name=right_col, row_offset=row_offset
+                    )
                     pairs: list[tuple[str, str]] = []
                     append = pairs.append
                     for offset, (left, right) in enumerate(zip(lefts, rights)):
