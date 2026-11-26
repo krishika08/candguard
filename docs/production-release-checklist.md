@@ -1,6 +1,6 @@
 # CandGuard v0.2.0 — Release Checklist (planned, not yet released)
 
-This checklist covers publishing **v0.2.0** to PyPI through the hardened `.github/workflows/publish.yml` workflow. v0.2.0 has **not** been released. The latest published version is 0.1.0, and the package on `main` still declares `0.1.0`.
+This checklist covers publishing **v0.2.0** to PyPI through the hardened `.github/workflows/publish.yml` workflow. v0.2.0 has **not** been released. The latest published version is 0.1.0. Once the version-bump PR (section 1) is merged, the package on `main` declares `0.2.0`.
 
 CandGuard is already on PyPI, so this is not a first-time publication. Do not create a new "pending publisher". Verify the existing Trusted Publishing configuration instead (section 2).
 
@@ -21,8 +21,11 @@ The release tag must then be `v0.2.0`.
 
 That PR should also move the [`CHANGELOG.md`](../CHANGELOG.md) entries from `[Unreleased]` to a `[0.2.0]` heading. Add the release date there, or right after publication.
 
+The same PR must also put `README.md` in its **final form for the release**. `pyproject.toml` declares `readme = "README.md"`, so the build embeds the README in the wheel and sdist metadata, and PyPI shows it as the 0.2.0 project description. A published release's description cannot be changed afterwards. Before tagging, the README must describe 0.2.0 features as part of 0.2.0 (not as unreleased or development-only) and must not claim that 0.2.0 is already on PyPI.
+
 - [ ] The version-bump PR is reviewed, CI is green, and it is merged into `main`.
 - [ ] `pyproject.toml` and `src/candguard/__init__.py` on `main` both declare `0.2.0`.
+- [ ] `README.md` on `main` is the intended 0.2.0 project description.
 
 ---
 
@@ -47,7 +50,7 @@ If any value differs, correct the PyPI configuration before tagging. A mismatch 
 Open <https://github.com/krishika08/candguard/settings/environments> and select `pypi`.
 
 - [ ] The environment exists and is named exactly `pypi`.
-- [ ] Its deployment branch and tag rules allow the new tag. If they were restricted to `v0.1.0` for the first release, add `v0.2.0` or a `v*` tag rule; otherwise the publish job cannot start.
+- [ ] Its deployment branch and tag rules allow the new tag. If they were restricted to `v0.1.0` for the first release, add `v0.2.0` or a `v*` tag rule; otherwise the publish job cannot start. With **Selected branches and tags**, only refs that match a rule can deploy, so a selection with no rules at all also blocks the release.
 - [ ] If **required reviewers** are configured, a reviewer is available to approve the deployment while the workflow runs.
 
 ---
@@ -159,7 +162,7 @@ These checks are local preparation only. The release workflow builds its own dis
    gh release create v0.2.0 --repo krishika08/candguard --title "CandGuard v0.2.0" --notes-file <notes.md>
    ```
 6. **Follow-up documentation PR:**
-   - in `README.md`, update the "Project status" and installation sections for the new published version;
+   - `README.md` needs no release update here: it was finalized in the version-bump PR (section 1) because it is the published project description;
    - in `SECURITY.md`, add 0.2.x to the supported-versions table and decide the status of 0.1.x;
    - in `CHANGELOG.md`, confirm the release date.
 

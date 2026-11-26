@@ -4,9 +4,9 @@ All notable changes to CandGuard are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and CandGuard uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — planned for v0.2.0
+## [0.2.0] — not yet released
 
-These changes are on the `main` branch and **have not been released**. The latest published package is 0.1.0 (`pip install candguard==0.1.0`), which does not include any of them. The package version on `main` is still `0.1.0` until the release version bump.
+The package version on `main` is `0.2.0`, but v0.2.0 has **not been tagged or published yet**. The latest release on PyPI is still 0.1.0, which does not include these changes. The release date will be added when v0.2.0 is published.
 
 ### Added
 
@@ -44,6 +44,8 @@ These changes are on the `main` branch and **have not been released**. The lates
 ### Fixed
 
 - `compare` now reports a clean "Could not parse … JSON report" error, with exit code 2, for a report containing an integer literal longer than Python's int-string conversion limit (Python 3.11+). Previously this was an unhandled traceback.
+- `audit --missed-pairs-out` (and `missed_pairs_path` in the Python API) is now rejected with exit code 2, before any input is read, when it resolves to the `--candidates` or `--truth` file, including through relative/absolute, `..` and symlink aliases. In 0.1.0 such a collision silently overwrote the input file with the missed-pairs export.
+- Unreadable files now exit with code 2 and a `candguard: error:` message instead of an unhandled traceback with exit code 1 (the quality-gate failure code). This covers CSV/TSV inputs that cannot be opened or read (for example permission denied or an I/O error) and `compare` reports that cannot be read. Parquet string identifiers that are not valid UTF-8 are reported the same way, naming the column and row.
 
 ### CI and release engineering
 
@@ -68,5 +70,5 @@ First published release on PyPI.
 - `candguard compare` regression checks: `--max-recall-drop`, `--max-pair-growth` and `--max-duplicate-growth`, with ground-truth fingerprint (`v2`) comparability checks.
 - Text and JSON reports (`schema_version` `"1.0"`), and CLI exit codes `0` (pass), `1` (quality gate failed) and `2` (invalid input or configuration).
 
-[Unreleased]: https://github.com/krishika08/candguard/compare/v0.1.0...main
+[0.2.0]: https://github.com/krishika08/candguard/compare/v0.1.0...main
 [0.1.0]: https://github.com/krishika08/candguard/tree/v0.1.0

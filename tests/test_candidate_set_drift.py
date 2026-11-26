@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import inspect
 import io
@@ -16,6 +17,7 @@ from typing import Any, Iterable, Iterator
 
 import pytest
 
+from candguard import __version__ as candguard_version
 from candguard import candidate_set as cs
 from candguard.audit import AuditError, audit_candidates
 from candguard.candidate_set import (
@@ -874,29 +876,74 @@ def test_large_synthetic_comparison_is_exact(tmp_path: Path) -> None:
     assert drift["union_pairs"] == n + shift + 500
 
 
-def _traced_compare_peak(tmp_path: Path, n: int) -> int:
+# Memory-growth measurement.
+#
+# The traced peak of one comparison is about 80 KB and does not depend on the number of pairs
+# (measured flat from 5,000 to 1,000,000 pairs). In one local configuration (Windows, Python
+# 3.12, full suite without coverage) a single measurement occasionally included an unrelated
+# one-off allocation of about 0.96 MB, giving 1,039,917 bytes. It depended on the process's
+# allocation history: changing almost anything (running the test alone, adding coverage,
+# disabling a pytest plugin, moving the checkout) made it disappear. So the measurement is
+# designed to be insensitive to one-off allocations while still catching per-pair growth:
+#
+# - ``gc.collect()`` before each measurement, so garbage left by earlier tests is not freed or
+#   finalized inside the measured window;
+# - each size is measured ``_MEMORY_REPEATS`` times and the minimum is used: a one-off
+#   allocation can inflate only one run, while a real streaming regression (for example
+#   materializing the pairs) recurs in every run;
+# - the gate is on growth between sizes, not on an absolute figure alone.
+_MEMORY_REPEATS = 2
+_SMALL_PAIRS = 5_000
+_LARGE_PAIRS = 100_000
+#: Allowed traced-peak growth from the small to the large comparison: about 1 byte per added
+#: baseline pair. Retaining pairs costs far more (a list alone stores an 8-byte pointer per pair,
+#: plus the tuple and its strings), so any per-pair retention exceeds this budget.
+_MAX_PEAK_GROWTH = _LARGE_PAIRS - _SMALL_PAIRS
+#: Absolute sanity bound on one streaming comparison's traced peak (normally about 80 KB).
+_MAX_PEAK = 1_000_000
+
+
+def _traced_compare_peak(tmp_path: Path, n: int, repeats: int = _MEMORY_REPEATS) -> int:
+    """Return the minimum traced peak (bytes) of ``repeats`` comparisons of two n-pair artifacts."""
     work = tmp_path / str(n)
     work.mkdir()
     b_meta = _write_sorted_artifact(work / "b.tsv", _seq_pairs(0, n))
     c_meta = _write_sorted_artifact(work / "c.tsv", _seq_pairs(n // 3, n + n // 3))
-    tracemalloc.start()
-    try:
-        tracemalloc.reset_peak()
-        start, _ = tracemalloc.get_traced_memory()
-        counts = cs.compare_candidate_set_artifacts(work / "b.tsv", work / "c.tsv", b_meta, c_meta)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert counts == (n - n // 3, n // 3, n // 3)
-    return peak - start
+    peaks: list[int] = []
+    for _ in range(repeats):
+        gc.collect()
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            start, _ = tracemalloc.get_traced_memory()
+            counts = cs.compare_candidate_set_artifacts(work / "b.tsv", work / "c.tsv", b_meta, c_meta)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert counts == (n - n // 3, n // 3, n // 3)
+        peaks.append(peak - start)
+    return min(peaks)
 
 
 def test_comparison_memory_does_not_grow_with_set_size(tmp_path: Path) -> None:
-    small = _traced_compare_peak(tmp_path, 5_000)
-    large = _traced_compare_peak(tmp_path, 100_000)
+    small = _traced_compare_peak(tmp_path, _SMALL_PAIRS)
+    large = _traced_compare_peak(tmp_path, _LARGE_PAIRS)
     # 20x more pairs; streaming keeps the traced peak essentially flat (a set would add ~10+ MB).
-    assert large < 1_000_000
-    assert large < 2 * small + 200_000
+    assert large - small < _MAX_PEAK_GROWTH, (small, large)
+    assert large < _MAX_PEAK, (small, large)
+
+
+def test_memory_measurement_detects_materialized_pairs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative control: the measurement above must flag a comparison that retains every pair."""
+    streaming_merge = cs.merge_sorted_pair_streams
+
+    def materializing_merge(baseline: Iterator[Pair], current: Iterator[Pair]) -> tuple[int, int, int]:
+        return streaming_merge(iter(list(baseline)), iter(list(current)))
+
+    monkeypatch.setattr(cs, "merge_sorted_pair_streams", materializing_merge)
+    small = _traced_compare_peak(tmp_path, _SMALL_PAIRS, repeats=1)
+    large = _traced_compare_peak(tmp_path, _LARGE_PAIRS, repeats=1)
+    assert large - small >= _MAX_PEAK_GROWTH, (small, large)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1077,8 +1124,10 @@ GOLDEN_COMPARE_TEXT_NO_GATES = (
     "\n"
     "Quality gate: PASS"
 )
+# The reports are produced by the running package, so the version fields follow
+# candguard.__version__; every other field must match the golden output exactly.
 GOLDEN_SIDE = {
-    "candguard_version": "0.1.0",
+    "candguard_version": candguard_version,
     "candidate_recall": 0.66666667,
     "ground_truth_fingerprint": "sha256:2e3c100e15eac48452552ee384f1b10eb8bf8e7bf23264c489042ad4ae3505c2",
     "ground_truth_fingerprint_version": "v2",
@@ -1104,7 +1153,7 @@ def test_legacy_compare_output_unchanged_from_main(tmp_path: Path, export: bool)
     report["baseline"]["path"], report["current"]["path"] = "BASE", "CURR"
     assert report == {
         "tool": "candguard",
-        "version": "0.1.0",
+        "version": candguard_version,
         "command": "compare",
         "schema_version": "1.0",
         "baseline": {**GOLDEN_SIDE, "path": "BASE", "candidate_rows": 5, "duplicate_candidate_rows": 1},

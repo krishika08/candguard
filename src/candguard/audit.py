@@ -116,6 +116,18 @@ def audit_candidates(
         has_missed_pairs_path=missed_pairs_path is not None,
     )
 
+    # Every output is checked against every input and every other output before any input is
+    # read or any output is opened. The CLI additionally checks --output against all of these.
+    if missed_pairs_path is not None:
+        ensure_distinct_output(
+            Path(missed_pairs_path),
+            {
+                "candidate input file": candidates_file,
+                "ground-truth input file": truth_file,
+            },
+            description="Missed-pairs output path",
+            flag="--missed-pairs-out",
+        )
     candidate_set_file = Path(candidate_set_path) if candidate_set_path is not None else None
     if candidate_set_file is not None:
         ensure_distinct_output(

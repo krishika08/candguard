@@ -52,16 +52,26 @@ def same_path(first: str | Path, second: str | Path) -> bool:
     return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
 
-def ensure_distinct_output(out_path: Path, others: Mapping[str, str | Path | None]) -> None:
-    """Reject an output path that resolves to an input or another output file."""
+def ensure_distinct_output(
+    out_path: Path,
+    others: Mapping[str, str | Path | None],
+    *,
+    description: str = "Candidate-set output path",
+    flag: str = "--candidate-set-out",
+) -> None:
+    """Reject an output path that resolves to an input or another output file.
+
+    ``description`` and ``flag`` name the output in the error message. This must run before any
+    input is read or any output is opened, so a collision can never truncate an input file.
+    """
     for label, other in others.items():
         if other is not None and same_path(out_path, other):
             raise AuditError(
-                f"Candidate-set output path {out_path} resolves to the {label} ({other}); "
-                "choose a different --candidate-set-out path."
+                f"{description} {out_path} resolves to the {label} ({other}); "
+                f"choose a different {flag} path."
             )
     if out_path.exists() and not out_path.is_file():
-        raise AuditError(f"Candidate-set output path is not a regular file: {out_path}")
+        raise AuditError(f"{description} is not a regular file: {out_path}")
 
 
 def write_candidate_set_artifact(
