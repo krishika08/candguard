@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .audit import AuditError, audit_candidates, render_text, report_json
+from ._output import _OutputPublication
+from .audit import AuditError, _audit_candidates, render_text, report_json
 from .candidate_set import same_path
 from .compare import compare_reports, render_compare_text
 
@@ -79,43 +80,38 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "audit":
-            if args.candidate_set_out and args.output and same_path(args.candidate_set_out, args.output):
-                raise AuditError(
-                    f"--candidate-set-out ({args.candidate_set_out}) and --output ({args.output}) "
-                    "must be different files."
+            report_path = Path(args.output) if args.output else None
+            with _OutputPublication() as publication:
+                report = _audit_candidates(
+                    publication=publication,
+                    report_path=report_path,
+                    candidates_path=args.candidates,
+                    left_id=args.left_id,
+                    right_id=args.right_id,
+                    truth_path=args.truth,
+                    truth_left_id=args.truth_left_id,
+                    truth_right_id=args.truth_right_id,
+                    delimiter=args.delimiter,
+                    truth_delimiter=args.truth_delimiter,
+                    linkage_type=args.linkage_type,
+                    left_records=args.left_records,
+                    right_records=args.right_records,
+                    min_recall=args.min_recall,
+                    max_pairs=args.max_pairs,
+                    max_duplicate_rows=args.max_duplicate_rows,
+                    missed_pairs_path=args.missed_pairs_out,
+                    candidate_set_path=args.candidate_set_out,
                 )
-            if args.output:
-                # Checked before any input is read so --output can never overwrite an input or
-                # another output of this audit.
-                for flag, other_path in (
-                    ("--candidates", args.candidates),
-                    ("--truth", args.truth),
-                    ("--missed-pairs-out", args.missed_pairs_out),
-                ):
-                    if other_path and same_path(args.output, other_path):
-                        raise AuditError(
-                            f"--output ({args.output}) resolves to the same file as {flag} ({other_path}); "
-                            f"--output must point to a different file so {flag} is not overwritten."
-                        )
-            report = audit_candidates(
-                candidates_path=args.candidates,
-                left_id=args.left_id,
-                right_id=args.right_id,
-                truth_path=args.truth,
-                truth_left_id=args.truth_left_id,
-                truth_right_id=args.truth_right_id,
-                delimiter=args.delimiter,
-                truth_delimiter=args.truth_delimiter,
-                linkage_type=args.linkage_type,
-                left_records=args.left_records,
-                right_records=args.right_records,
-                min_recall=args.min_recall,
-                max_pairs=args.max_pairs,
-                max_duplicate_rows=args.max_duplicate_rows,
-                missed_pairs_path=args.missed_pairs_out,
-                candidate_set_path=args.candidate_set_out,
-            )
-            rendered = report_json(report) if args.format == "json" else render_text(report)
+                try:
+                    rendered = report_json(report) if args.format == "json" else render_text(report)
+                except Exception as exc:
+                    destination = report_path if report_path is not None else "stdout"
+                    raise AuditError(f"Could not render audit report for {destination}: {exc}") from exc
+                if report_path is not None:
+                    with publication.stage(report_path, "output") as stream:
+                        stream.write(rendered)
+                        stream.write("\n")
+                publication.publish()
         elif args.command == "compare":
             if args.output:
                 # Checked before any input is read so --output can never overwrite an input.
@@ -144,10 +140,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             parser.error(f"Unknown command: {args.command}")
     except AuditError as exc:
-        print(f"candguard: error: {exc}", file=sys.stderr)
+        message = " ".join(str(exc).splitlines()) if args.command == "audit" else str(exc)
+        print(f"candguard: error: {message}", file=sys.stderr)
         return 2
 
-    if args.output:
+    if args.command == "compare" and args.output:
         try:
             out_file = Path(args.output)
             out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -157,13 +154,20 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             print(f"candguard: error: Could not write output to {args.output}: {exc}", file=sys.stderr)
             return 2
-    else:
+    elif not args.output:
         try:
-            print(rendered)
-        except UnicodeEncodeError:
-            sys.stdout.buffer.write(rendered.encode("utf-8", errors="replace"))
-            sys.stdout.buffer.write(b"\n")
-            sys.stdout.buffer.flush()
+            try:
+                print(rendered, flush=args.command == "audit")
+            except UnicodeEncodeError:
+                sys.stdout.buffer.write(rendered.encode("utf-8", errors="replace"))
+                sys.stdout.buffer.write(b"\n")
+                sys.stdout.buffer.flush()
+        except OSError as exc:
+            if args.command != "audit":
+                raise
+            message = " ".join(str(exc).splitlines())
+            print(f"candguard: error: Could not write output to stdout: {message}", file=sys.stderr)
+            return 2
 
     return 0 if report["quality_gate"]["passed"] else 1
 

@@ -261,15 +261,19 @@ candguard compare \
 
 `--min-candidate-jaccard` is optional; without it, drift is diagnostic only. Cross-linkage pairs keep their direction, and dedupe pairs are undirected. See [`docs/candidate-set-drift.md`](docs/candidate-set-drift.md) for the sidecar format, definitions, a CI workflow, measured performance and limitations.
 
-### Output safety *(0.2.0)*
+### Output safety
 
-Before reading any input, the CLI rejects (exit code 2) an output path that resolves to another file the command uses. It compares exact paths, relative and absolute aliases, `..` paths and symlinks:
+Before reading input, the CLI rejects output paths that resolve to any of the following files (exit code 2). It detects absolute and relative aliases, `..` components, symlinks and hard-link aliases where supported.
 - `audit --output` cannot be the `--candidates`, `--truth`, `--missed-pairs-out` or `--candidate-set-out` file;
 - `--missed-pairs-out` cannot be the `--candidates` or `--truth` file;
 - `--candidate-set-out` cannot be an input or the missed-pairs file;
 - `compare --output` cannot be either report or either candidate-set sidecar.
 
-Audit outputs are written in sequence. If a later output fails, an earlier output may already be present, even when the CLI returns exit code 2.
+An audit writes all requested files to temporary files beside their destinations, flushes and closes every file, and backs up existing destinations before replacing any of them. It publishes missed pairs first, the candidate-set sidecar second, and the report file last. The Python API coordinates its requested sidecars the same way. An audit that completes publishes its outputs whether the quality gate passes (exit 0) or fails (exit 1). Audit destinations must be regular files or new paths. Directories, symlinks, broken symlinks, and other unsupported destination types are rejected.
+
+If a replacement fails, CandGuard returns an error and works backward through the files it replaced, restoring previous files and removing new ones. If recovery fails, the error names the affected destinations and gives the exact paths of retained backups. A leftover temporary file or backup after successful publication is logged as a cleanup warning. Parent directories created during staging can remain after a failed audit.
+
+Each replacement is atomic where the filesystem supports it. Readers can see a mix of old and new files during publication, and a crash or power loss can interrupt publication or recovery. Run only one writer per destination and keep the input files and destination paths stable until the audit finishes. With stdout, the CLI renders the report, publishes the sidecars, and then writes the report to the stream. The sidecars stay published if that write fails, and bytes sent to stdout cannot be retracted.
 
 ### Minimal CI example (GitHub Actions)
 

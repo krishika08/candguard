@@ -12,9 +12,10 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Iterator, Protocol, TextIO
 
-from .candidate_set import write_candidate_set_artifact
+from ._output import _OutputPublication
+from .candidate_set import _stage_candidate_set_artifact, write_candidate_set_artifact
 from .metrics import compute_mean_degree_ratio, compute_truth_fingerprint_v2, summarize_degree_histogram
 from .models import AuditError
 from .readers import CandidateReader
@@ -362,25 +363,23 @@ class SQLiteStorageEngine:
 
     def export_missed_pairs(
         self,
-        out_path: Path,
+        stream: TextIO,
         truth_left_header: str,
         truth_right_header: str,
     ) -> None:
-        """Export missed ground-truth pairs to TSV."""
-        conn = self.connection
+        """Stream missed ground-truth pairs in TSV format."""
         try:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with out_path.open("w", encoding="utf-8", newline="") as out_stream:
-                writer = csv.writer(out_stream, delimiter="\t", lineterminator="\n")
-                writer.writerow([truth_left_header, truth_right_header])
-                cursor = conn.execute(
-                    "SELECT t.left_id, t.right_id FROM truth_pairs t "
-                    "LEFT JOIN candidate_pairs c ON c.left_id=t.left_id AND c.right_id=t.right_id "
-                    "WHERE c.left_id IS NULL ORDER BY t.left_id, t.right_id"
-                )
+            writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+            writer.writerow([truth_left_header, truth_right_header])
+            cursor = self.connection.execute(
+                "SELECT t.left_id, t.right_id FROM truth_pairs t "
+                "LEFT JOIN candidate_pairs c ON c.left_id=t.left_id AND c.right_id=t.right_id "
+                "WHERE c.left_id IS NULL ORDER BY t.left_id, t.right_id"
+            )
+            try:
                 writer.writerows(cursor)
-        except OSError as exc:
-            raise AuditError(f"Could not write missed pairs to {out_path}: {exc}") from exc
+            finally:
+                cursor.close()
         except sqlite3.Error as exc:
             raise AuditError(f"SQLite failed while exporting missed pairs: {exc}") from exc
 
@@ -389,8 +388,10 @@ class SQLiteStorageEngine:
         out_path: Path,
         linkage_type: str,
         expected_pairs: int,
+        *,
+        _publication: _OutputPublication | None = None,
     ) -> dict[str, Any]:
-        """Atomically export the unique normalized candidate pairs as a sorted TSV sidecar.
+        """Export the unique normalized candidate pairs as a sorted TSV sidecar.
 
         Reads the deduplicated ``candidate_pairs`` table (canonical ``(min, max)`` pairs in
         dedupe mode, directional pairs in cross mode) in ``left_id, right_id`` BINARY order via
@@ -406,6 +407,10 @@ class SQLiteStorageEngine:
         except sqlite3.Error as exc:
             raise AuditError(f"SQLite failed while exporting the candidate set: {exc}") from exc
         try:
+            if _publication is not None:
+                return _stage_candidate_set_artifact(
+                    cursor, out_path, linkage_type=linkage_type, expected_pairs=expected_pairs, publication=_publication,
+                )
             return write_candidate_set_artifact(
                 cursor, out_path, linkage_type=linkage_type, expected_pairs=expected_pairs
             )

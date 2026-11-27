@@ -15,10 +15,10 @@ import csv
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
+from ._output import _OutputPublication, _regular_destination
 from .metrics import CANDIDATE_SET_FINGERPRINT_VERSION, CandidateSetFingerprintV1
 from .models import AuditError
 
@@ -70,8 +70,7 @@ def ensure_distinct_output(
                 f"{description} {out_path} resolves to the {label} ({other}); "
                 f"choose a different {flag} path."
             )
-    if out_path.exists() and not out_path.is_file():
-        raise AuditError(f"{description} is not a regular file: {out_path}")
+    _regular_destination(out_path, description)
 
 
 def write_candidate_set_artifact(
@@ -81,74 +80,65 @@ def write_candidate_set_artifact(
     linkage_type: str,
     expected_pairs: int,
 ) -> dict[str, Any]:
-    """Atomically write sorted unique pairs as a ``candguard-pairs-tsv-v1`` artifact.
-
-    Pairs are streamed to a temporary file in the destination directory, checked for strict
-    ascending order (and canonical ``left < right`` order in dedupe mode), hashed, and the
-    temporary file atomically replaces ``out_path`` only after every pair was written and the
-    count matches ``expected_pairs``. On any failure the temporary file is removed and an
-    existing file at ``out_path`` is left untouched. Returns the report metadata.
-    """
+    """Atomically publish a sorted unique-pair artifact and return its metadata."""
     target = Path(out_path)
-    parent = target.parent
+    _regular_destination(target, "candidate-set artifact")
+    with _OutputPublication() as publication:
+        metadata = _stage_candidate_set_artifact(
+            pairs, target, linkage_type=linkage_type, expected_pairs=expected_pairs, publication=publication,
+        )
+        publication.publish()
+    return metadata
+
+
+def _stage_candidate_set_artifact(
+    pairs: Iterable[tuple[str, str]],
+    target: Path,
+    *,
+    linkage_type: str,
+    expected_pairs: int,
+    publication: _OutputPublication,
+) -> dict[str, Any]:
+    """Validate and fingerprint sorted pairs as they stream into a staged artifact."""
     is_dedupe = linkage_type == "dedupe"
     hasher = CandidateSetFingerprintV1(linkage_type)
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
-    except OSError as exc:
-        raise AuditError(f"Could not create candidate-set artifact {target}: {exc}") from exc
-
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
-            writer = csv.writer(stream, delimiter="\t", quotechar='"', lineterminator="\n")
-            # Python < 3.12 QUOTE_MINIMAL does not quote a bare "\r" when the line terminator is
-            # "\n", which would split the row on read. Rows containing "\r" are therefore written
-            # with both fields quoted, so the bytes are identical on every supported Python.
-            quote_all = csv.writer(
-                stream, delimiter="\t", quotechar='"', lineterminator="\n", quoting=csv.QUOTE_ALL
-            )
-            writer.writerow(CANDIDATE_SET_HEADER)
-            previous: tuple[str, str] | None = None
-            for pair in pairs:
-                left, right = pair
-                if not left or not right:
-                    raise AuditError(f"Cannot export candidate pair with an empty identifier: {_pair_text(pair)}.")
-                if previous is not None and not previous < pair:
-                    raise AuditError(
-                        "Candidate pairs were not produced in strict ascending order "
-                        f"({_pair_text(previous)} then {_pair_text(pair)}); refusing to write {target}."
-                    )
-                if is_dedupe and not left < right:
-                    raise AuditError(f"Deduplication pair {_pair_text(pair)} is not canonical (left_id < right_id).")
-                if not _CSV_SUPPORTS_NUL and ("\x00" in left or "\x00" in right):
-                    raise AuditError(
-                        f"Candidate identifier {_pair_text(pair)} contains a NUL character, which the csv "
-                        "module of Python < 3.11 cannot read back; use Python 3.11+ to export this candidate set."
-                    )
-                if "\r" in left or "\r" in right:
-                    quote_all.writerow(pair)
-                else:
-                    writer.writerow(pair)
-                hasher.update(left, right)
-                previous = pair
-            stream.flush()
-            os.fsync(stream.fileno())
+    with publication.stage(target, "candidate-set artifact", newline="", create_action="create") as stream:
+        writer = csv.writer(stream, delimiter="\t", quotechar='"', lineterminator="\n")
+        # Python < 3.12 QUOTE_MINIMAL does not quote a bare "\r" when the line terminator is
+        # "\n", which would split the row on read. Rows containing "\r" are therefore written
+        # with both fields quoted, so the bytes are identical on every supported Python.
+        quote_all = csv.writer(
+            stream, delimiter="\t", quotechar='"', lineterminator="\n", quoting=csv.QUOTE_ALL
+        )
+        writer.writerow(CANDIDATE_SET_HEADER)
+        previous: tuple[str, str] | None = None
+        for pair in pairs:
+            left, right = pair
+            if not left or not right:
+                raise AuditError(f"Cannot export candidate pair with an empty identifier: {_pair_text(pair)}.")
+            if previous is not None and not previous < pair:
+                raise AuditError(
+                    "Candidate pairs were not produced in strict ascending order "
+                    f"({_pair_text(previous)} then {_pair_text(pair)}); refusing to write {target}."
+                )
+            if is_dedupe and not left < right:
+                raise AuditError(f"Deduplication pair {_pair_text(pair)} is not canonical (left_id < right_id).")
+            if not _CSV_SUPPORTS_NUL and ("\x00" in left or "\x00" in right):
+                raise AuditError(
+                    f"Candidate identifier {_pair_text(pair)} contains a NUL character, which the csv "
+                    "module of Python < 3.11 cannot read back; use Python 3.11+ to export this candidate set."
+                )
+            if "\r" in left or "\r" in right:
+                quote_all.writerow(pair)
+            else:
+                writer.writerow(pair)
+            hasher.update(left, right)
+            previous = pair
         if hasher.count != expected_pairs:
             raise AuditError(
                 f"Candidate-set export wrote {hasher.count} pair(s) but the audit counted {expected_pairs} "
                 f"unique pair(s); refusing to write {target}."
             )
-        os.replace(tmp_path, target)
-    except OSError as exc:
-        raise AuditError(f"Could not write candidate-set artifact to {target}: {exc}") from exc
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
 
     return {
         "format": CANDIDATE_SET_FORMAT,
