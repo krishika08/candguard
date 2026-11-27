@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import __version__
-from .candidate_set import ensure_distinct_output
+from ._output import _OutputPublication, _regular_destination
+from .candidate_set import ensure_distinct_output, same_path
 from .metrics import compute_possible_pairs, compute_record_coverage, compute_reduction_ratio
 from .models import AuditError, argument_path, validate_audit_arguments
 from .readers import CandidateReader, DelimitedReader, get_reader, resolve_delimiter
@@ -99,10 +100,45 @@ def audit_candidates(
     In cross mode, candidate pairs are directional: (left, right) is distinct from (right, left).
     In dedupe mode, pairs are logically unordered and stored canonically (min, max).
 
-    When ``candidate_set_path`` is given, the unique normalized candidate pairs are exported
-    after a successful audit to a sorted ``candguard-pairs-tsv-v1`` sidecar (written atomically),
-    and the report gains a ``candidate_set`` section with its pair count and fingerprint.
+    Requested sidecars are staged before publication. If a replacement fails, the audit
+    attempts to restore any sidecar it already replaced. A completed audit publishes
+    its sidecars even when the quality gate fails.
     """
+    with _OutputPublication() as publication:
+        report = _audit_candidates(
+            candidates_path=candidates_path, left_id=left_id, right_id=right_id,
+            truth_path=truth_path, truth_left_id=truth_left_id, truth_right_id=truth_right_id,
+            delimiter=delimiter, truth_delimiter=truth_delimiter, linkage_type=linkage_type,
+            left_records=left_records, right_records=right_records, min_recall=min_recall,
+            max_pairs=max_pairs, max_duplicate_rows=max_duplicate_rows,
+            missed_pairs_path=missed_pairs_path, candidate_set_path=candidate_set_path,
+            publication=publication,
+        )
+        publication.publish()
+    return report
+
+
+def _audit_candidates(
+    *,
+    publication: _OutputPublication,
+    report_path: Path | None = None,
+    candidates_path: str | Path,
+    left_id: str,
+    right_id: str,
+    truth_path: str | Path | None = None,
+    truth_left_id: str | None = None,
+    truth_right_id: str | None = None,
+    delimiter: str | None = None,
+    truth_delimiter: str | None = None,
+    linkage_type: str = "cross",
+    left_records: int | None = None,
+    right_records: int | None = None,
+    min_recall: float | None = None,
+    max_pairs: int | None = None,
+    max_duplicate_rows: int | None = None,
+    missed_pairs_path: str | Path | None = None,
+    candidate_set_path: str | Path | None = None,
+) -> dict[str, Any]:
     validate_audit_arguments(
         linkage_type=linkage_type,
         left_records=left_records,
@@ -127,27 +163,7 @@ def audit_candidates(
     missed_pairs_file = argument_path("missed_pairs_path", missed_pairs_path) if missed_pairs_path is not None else None
     candidate_set_file = argument_path("candidate_set_path", candidate_set_path) if candidate_set_path is not None else None
 
-    # Every output is checked against every input and every other output before any input is
-    # read or any output is opened. The CLI additionally checks --output against all of these.
-    if missed_pairs_file is not None:
-        ensure_distinct_output(
-            missed_pairs_file,
-            {
-                "candidate input file": candidates_file,
-                "ground-truth input file": truth_file,
-            },
-            description="Missed-pairs output path",
-            flag="--missed-pairs-out",
-        )
-    if candidate_set_file is not None:
-        ensure_distinct_output(
-            candidate_set_file,
-            {
-                "candidate input file": candidates_file,
-                "ground-truth input file": truth_file,
-                "missed-pairs output file": missed_pairs_file,
-            },
-        )
+    _preflight_outputs(candidates_file, truth_file, missed_pairs_file, candidate_set_file, report_path)
 
     # Build readers before ingesting anything so configuration errors (for example a delimiter
     # override on Parquet input, or a missing optional dependency) are reported up front.
@@ -252,7 +268,8 @@ def audit_candidates(
                 failures.append(f"candidate recall ({recovered}/{truth_unique}) is below required {min_recall}")
 
             if missed_pairs_file is not None:
-                engine.export_missed_pairs(missed_pairs_file, truth_left, truth_right)
+                with publication.stage(missed_pairs_file, "missed pairs", newline="") as stream:
+                    engine.export_missed_pairs(stream, truth_left, truth_right)
                 ground_truth["missed_pairs_file"] = str(missed_pairs_file)
 
         if max_pairs is not None and unique_candidate_pairs > max_pairs:
@@ -279,12 +296,43 @@ def audit_candidates(
             "quality_gate": {"passed": not failures, "failures": failures},
         }
 
-        # Export after metrics and the missed-pairs export. The candidate-set writer replaces
-        # its own output atomically. Earlier outputs may already exist if this export fails.
         if candidate_set_file is not None:
             report["candidate_set"] = engine.export_candidate_set(
                 candidate_set_file,
                 linkage_type=linkage_type,
                 expected_pairs=unique_candidate_pairs,
+                _publication=publication,
             )
         return report
+
+
+def _preflight_outputs(
+    candidates: Path, truth: Path | None, missed: Path | None, candidate_set: Path | None, report: Path | None
+) -> None:
+    """Reject colliding or unsupported destinations before building any input reader."""
+    if report is not None:
+        if candidate_set is not None and same_path(candidate_set, report):
+            raise AuditError(
+                f"--candidate-set-out ({candidate_set}) and --output ({report}) must be different files."
+            )
+        for flag, other in (
+            ("--candidates", candidates), ("--truth", truth), ("--missed-pairs-out", missed)
+        ):
+            if other is not None and same_path(report, other):
+                raise AuditError(
+                    f"--output ({report}) resolves to the same file as {flag} ({other}); "
+                    f"--output must point to a different file so {flag} is not overwritten."
+                )
+        _regular_destination(report, "output")
+
+    inputs = {"candidate input file": candidates, "ground-truth input file": truth}
+    if missed is not None:
+        ensure_distinct_output(missed, inputs, description="Missed-pairs output path", flag="--missed-pairs-out")
+    if candidate_set is not None:
+        ensure_distinct_output(candidate_set, {**inputs, "missed-pairs output file": missed})
+
+    paths = [path for path in (missed, candidate_set, report) if path is not None]
+    for path in paths:
+        for other in paths:
+            if path != other and any(same_path(path, parent) for parent in other.parents):
+                raise AuditError(f"Audit output {path} cannot be a parent directory of another output ({other}).")

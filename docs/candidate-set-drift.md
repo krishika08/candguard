@@ -86,14 +86,11 @@ Identifiers are exported exactly as the audit normalized them: trimmed text, wit
 - **Cross-linkage (`--linkage-type cross`):** pairs are directional. `(A, B)` and `(B, A)` are different pairs and are exported as separate rows. A pair whose direction changes between runs therefore counts as one removal plus one addition.
 - **Deduplication (`--linkage-type dedupe`):** pairs are undirected. Each pair is stored once in canonical form with `left_id < right_id`. Input rows `(B, A)` and `(A, B)` are the same edge, and self-pairs are still rejected during the audit.
 
-### Atomic output
+### Output publication
 
-The sidecar is first written to a temporary file in the destination directory. That file is flushed and `fsync`ed. Only after every pair has been written, and the count matches the audit's `inputs.unique_candidate_pairs`, does it atomically replace the target with `os.replace`.
+CandGuard streams the sidecar to a temporary file in its destination directory. It verifies the pair count against `inputs.unique_candidate_pairs`, flushes and syncs the file, and closes it before publication. The audit coordinates its requested sidecars and any CLI report file. It stages them all before replacing the first destination and publishes the report last. An audit that completes still publishes the sidecar when a quality gate fails (exit code 1).
 
-- Parent directories are created when needed.
-- If anything fails, the temporary file is removed and any existing file at the target path is left untouched.
-- An audit that fails, for example because the truth file is invalid, never writes a sidecar.
-- An audit that runs successfully but fails a quality gate (exit code 1) still writes its sidecar, because a gate failure is a result rather than an error.
+During rollback after a replacement failure, CandGuard restores previous outputs from backups and removes newly published outputs. With a rollback failure, the error names the destinations that need attention and the paths of any recovery backups. See the [output safety notes](../README.md#output-safety) for the concurrent-writer assumption and stdout and crash limitations.
 
 The output path is rejected (exit code 2) when it resolves to any of these:
 - the candidate input file;
@@ -332,4 +329,4 @@ These are single-machine measurements, not a performance guarantee. Compare time
 - **Sidecars grow with the candidate set** and must be stored and moved by your CI system. They are not compressed.
 - **Long identifiers:** when reading, identifiers longer than Python's default `csv` field-size limit (131,072 characters) are rejected as malformed.
 - **NUL characters:** identifiers containing NUL characters can be exported and compared on Python 3.11+. On Python 3.10 the export refuses them with an explicit error, because that version's `csv` reader cannot read them back.
-- **Partial results:** the CLI writes the sidecar before writing the `--output` report. If writing the report then fails (exit 2), the sidecar remains on disk.
+- **Publication visibility:** readers can see partially updated output sets while the audit replaces files. Each replacement is atomic where supported. A crash or failed rollback can leave a partial result. With stdout, sidecars are already published when the CLI writes the report.

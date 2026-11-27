@@ -396,12 +396,7 @@ def _assert_audit_rejected(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import candguard.cli as cli_module
-
-    def must_not_run(**kwargs: object) -> dict[str, object]:
-        raise AssertionError("audit_candidates() must not run when --output collides with another path")
-
-    monkeypatch.setattr(cli_module, "audit_candidates", must_not_run)
+    _forbid_input_reads(monkeypatch)
     before = _tree_snapshot(tmp_path)
     capsys.readouterr()
     assert main(args) == 2
