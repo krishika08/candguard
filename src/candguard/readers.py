@@ -73,12 +73,19 @@ class CandidateReader(Protocol):
 def resolve_delimiter(path: Path, override: str | None) -> str:
     """Resolve file delimiter from an optional override or file suffix."""
     if override is not None:
-        try:
-            delim = codecs.decode(override, "unicode_escape")
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise AuditError(f"Invalid delimiter escape sequence {override!r}: {exc}") from exc
+        delim = override
+        if override.isascii() and "\\" in override:
+            try:
+                delim = codecs.decode(override, "unicode_escape")
+            except UnicodeDecodeError as exc:
+                raise AuditError(f"Invalid delimiter escape sequence {override!r}: {exc}") from exc
         if len(delim) != 1:
             raise AuditError(f"Delimiter must be a single character, got {override!r}")
+        if delim in {'"', "\r", "\n"}:
+            raise AuditError(
+                f"Unsupported delimiter {delim!r}. Choose a character other than "
+                "the CSV double quote, carriage return, or newline."
+            )
         return delim
     if path.suffix.lower() in {".tsv", ".tab"}:
         return "\t"

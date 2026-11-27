@@ -281,6 +281,28 @@ def test_delimiter_override_and_tsv_escaping(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(("override", "separator"), [(";", ";"), (r"\t", "\t"), ("\u00a7", "\u00a7")])
+def test_delimiter_preserves_pairs(tmp_path, override, separator):
+    candidates = tmp_path / "pairs.dat"
+    candidates.write_text(f's{separator}c\n"a{separator}b"{separator}z\n', encoding="utf-8")
+    truth = tmp_path / "truth.csv"
+    truth.write_text(f's,c\n"a{separator}b",z\n', encoding="utf-8")
+
+    report = audit_candidates(
+        candidates_path=candidates, truth_path=truth, left_id="s", right_id="c", delimiter=override,
+        truth_delimiter=",",
+    )
+    assert report["inputs"]["unique_candidate_pairs"] == report["ground_truth"]["recovered_pairs"] == 1
+
+
+@pytest.mark.parametrize("delimiter", ['"', "\r", "\n"])
+def test_invalid_delimiter_raises_audit_error(tmp_path, delimiter):
+    candidates = tmp_path / "pairs.csv"
+    candidates.write_text("s,c\na,b\n", encoding="utf-8")
+    with pytest.raises(AuditError, match="Unsupported delimiter"):
+        audit_candidates(candidates_path=candidates, left_id="s", right_id="c", delimiter=delimiter)
+
+
 def test_quoted_values_and_embedded_delimiters(tmp_path: Path) -> None:
     candidates = tmp_path / "candidates.csv"
     # ID contains comma inside quotes: "A,1",B
