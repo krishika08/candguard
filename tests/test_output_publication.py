@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 
@@ -12,6 +14,7 @@ import pytest
 import candguard.audit as audit_module
 import candguard.cli as cli_module
 from candguard.audit import AuditError, audit_candidates
+from candguard.candidate_set import write_candidate_set_artifact
 from candguard.metrics import compute_candidate_set_fingerprint_v1
 
 
@@ -408,3 +411,150 @@ def test_cli_stdout_write_failure_leaves_complete_sidecars(tmp_path, monkeypatch
     assert _cli(paths, _OUTPUTS[:2]) == 2
     _cli_error(capsys, "stdout", "injected stdout write failure")
     assert set(_snapshot(tmp_path)) == {paths[name] for name in ("candidates", "truth", "missed", "pairs")}
+
+
+_posix_modes = pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission modes and umask")
+
+
+def _mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@_posix_modes
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o600, 0o444], ids=lambda mode: f"{mode:04o}")
+def test_posix_replacements_preserve_modes_without_changing_originals(tmp_path, monkeypatch, mode):
+    paths = _files(tmp_path, _OUTPUTS, separate=True)
+    originals = _snapshot(tmp_path)
+    for name in _OUTPUTS:
+        paths[name].chmod(mode)
+    replace = os.replace
+
+    def verify_original_and_stage(source, destination):
+        destination = Path(destination)
+        assert destination.read_bytes() == originals[destination]
+        assert _mode(destination) == _mode(Path(source)) == mode
+        return replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", verify_original_and_stage)
+    assert _cli(paths) == 0
+    assert all(_mode(paths[name]) == mode for name in _OUTPUTS)
+    _assert_artifacts(paths, _OUTPUTS, json.loads(paths["report"].read_bytes()))
+    assert set(_snapshot(tmp_path)) == set(originals)
+
+
+@_posix_modes
+@pytest.mark.parametrize(("mask", "expected"), [(0o022, 0o644), (0o027, 0o640)])
+@pytest.mark.parametrize("entry_point", ["cli", "api", "standalone"])
+def test_posix_new_outputs_respect_umask_without_changing_it(tmp_path, monkeypatch, mask, expected, entry_point):
+    paths = _files(tmp_path)
+    previous = os.umask(mask)
+
+    def forbid_umask(*args):
+        pytest.fail("publication must never change the process umask")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "umask", forbid_umask)
+            if entry_point == "cli":
+                assert _cli(paths) == 0
+                names = _OUTPUTS
+            elif entry_point == "api":
+                _api(paths)
+                names = _OUTPUTS[:2]
+            else:
+                write_candidate_set_artifact([("a", "2")], paths["pairs"], linkage_type="cross", expected_pairs=1)
+                names = ("pairs",)
+            assert all(_mode(paths[name]) == expected for name in names)
+    finally:
+        os.umask(previous)
+
+
+@_posix_modes
+def test_posix_standalone_replacement_keeps_mode(tmp_path):
+    target = tmp_path / "pairs.tsv"
+    target.write_bytes(b"existing\n")
+    target.chmod(0o640)
+    write_candidate_set_artifact([("a", "2")], target, linkage_type="cross", expected_pairs=1)
+    assert target.read_bytes() == b"left_id\tright_id\na\t2\n"
+    assert _mode(target) == 0o640
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@_posix_modes
+def test_posix_new_stage_retries_on_existing_symlink(tmp_path, monkeypatch):
+    paths = _files(tmp_path)
+    collision = tmp_path / f".candguard-{'a' * 32}.stage"
+    collision.symlink_to(paths["candidates"])
+    choices = iter(["a" * 32, "b" * 32])
+    monkeypatch.setattr(secrets, "token_hex", lambda size: next(choices))
+    before = paths["candidates"].read_bytes()
+
+    assert _cli(paths, ("report",)) == 0
+    assert collision.is_symlink()
+    assert paths["candidates"].read_bytes() == before
+    assert not (tmp_path / f".candguard-{'b' * 32}.stage").exists()
+    assert next(choices, None) is None
+
+
+@_posix_modes
+@pytest.mark.parametrize("rollback_fails", [False, True], ids=["restored", "retained-backup"])
+def test_posix_rollback_preserves_original_or_recovery_modes(tmp_path, monkeypatch, capsys, rollback_fails):
+    paths = _files(tmp_path, _OUTPUTS, separate=True)
+    originals = _snapshot(tmp_path)
+    modes = {"missed": 0o444, "pairs": 0o640, "report": 0o600}
+    for name, mode in modes.items():
+        paths[name].chmod(mode)
+    replace = os.replace
+    rolled_back = False
+    recovery = None
+
+    def fail_replace(source, destination):
+        nonlocal rolled_back, recovery
+        destination = Path(destination)
+        if destination == paths["report"]:
+            assert _mode(paths["missed"]) == modes["missed"]
+            assert _mode(paths["pairs"]) == modes["pairs"]
+            rolled_back = True
+            raise PermissionError("report replacement denied")
+        if rolled_back and rollback_fails and destination == paths["pairs"]:
+            recovery = Path(source)
+            raise PermissionError("pairs rollback denied")
+        return replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert _cli(paths) == 2
+    unexpected = set()
+    if rollback_fails:
+        assert recovery is not None
+        _cli_error(capsys, "report replacement denied", "pairs rollback denied", recovery)
+        assert recovery.read_bytes() == originals[paths["pairs"]]
+        assert _mode(recovery) == modes["pairs"]
+        unexpected.add(recovery)
+    else:
+        _cli_error(capsys, "report replacement denied")
+        assert paths["pairs"].read_bytes() == originals[paths["pairs"]]
+    for name in ("missed", "report"):
+        assert paths[name].read_bytes() == originals[paths[name]]
+    assert all(_mode(paths[name]) == mode for name, mode in modes.items())
+    assert set(_snapshot(tmp_path)) == set(originals) | unexpected
+
+
+@_posix_modes
+def test_posix_mode_setting_failure_leaves_existing_outputs_unchanged(tmp_path, monkeypatch, capsys):
+    paths = _files(tmp_path, _OUTPUTS)
+    modes = {"missed": 0o444, "pairs": 0o640, "report": 0o644}
+    for name, mode in modes.items():
+        paths[name].chmod(mode)
+    originals = _snapshot(tmp_path)
+    fchmod = os.fchmod
+
+    def fail_pairs(fd, mode):
+        if mode == modes["pairs"]:
+            raise PermissionError("injected stage permission error")
+        return fchmod(fd, mode)
+
+    monkeypatch.setattr(os, "fchmod", fail_pairs)
+    assert _cli(paths) == 2
+    _cli_error(capsys, "injected stage permission error", paths["pairs"])
+    assert _snapshot(tmp_path) == originals
+    assert all(_mode(paths[name]) == mode for name, mode in modes.items())
