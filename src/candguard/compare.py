@@ -9,7 +9,7 @@ from typing import Any
 
 from . import __version__
 from .candidate_set import compare_candidate_set_artifacts, validate_candidate_set_metadata
-from .metrics import compute_candidate_set_drift, compute_relative_growth
+from .metrics import METRIC_PRECISION, compute_candidate_set_drift, compute_relative_growth
 from .models import (
     AuditError,
     argument_path,
@@ -115,6 +115,8 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
             f"expected a finite number between 0 and 1 or null, got {recall!r}."
         )
 
+    _validate_ground_truth_counts(truth, label, path)
+
     fingerprint = truth.get("fingerprint")
     if fingerprint is not None and (not isinstance(fingerprint, str) or not fingerprint):
         raise AuditError(
@@ -129,6 +131,51 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
                 f"Invalid 'ground_truth.fingerprint_version' in {label} report ({path}): "
                 f"expected a non-empty string (omit it for legacy reports), got {version!r}."
             )
+
+
+def _validate_ground_truth_counts(truth: dict[str, Any], label: str, path: Path) -> None:
+    counts: dict[str, int] = {}
+    for field in ("rows", "unique_pairs", "recovered_pairs", "missed_pairs"):
+        if field not in truth:
+            continue
+        count = truth[field]
+        if type(count) is not int or count < 0:
+            raise AuditError(
+                f"Invalid 'ground_truth.{field}' in {label} report ({path}): "
+                f"expected non-negative integer, got {count!r}."
+            )
+        counts[field] = count
+
+    if not counts:
+        return
+
+    unique = counts.get("unique_pairs")
+    recovered = counts.get("recovered_pairs")
+    context = f"'ground_truth' in {label} report ({path})"
+    if unique is None or recovered is None:
+        raise AuditError(
+            f"Incomplete {context}: found {', '.join(counts)}. Both unique_pairs and "
+            "recovered_pairs are required when any ground-truth count is present."
+        )
+    if recovered > unique:
+        raise AuditError(f"Inconsistent {context}: recovered_pairs cannot exceed unique_pairs.")
+    if "missed_pairs" in counts and recovered + counts["missed_pairs"] != unique:
+        raise AuditError(f"Inconsistent {context}: recovered_pairs plus missed_pairs must equal unique_pairs.")
+    if "rows" in counts and counts["rows"] < unique:
+        raise AuditError(f"Inconsistent {context}: rows cannot be fewer than unique_pairs.")
+
+    recall = truth.get("candidate_recall")
+    if recall is None:
+        return
+    if unique == 0:
+        raise AuditError(f"Inconsistent {context}: candidate_recall must be null or omitted when unique_pairs is zero.")
+
+    # Match audit's float-then-round representation. Older consumers may store the unrounded float.
+    measured = float(_recall_from_report(truth))
+    if recall not in (measured, round(measured, METRIC_PRECISION)):
+        raise AuditError(
+            f"ground_truth.candidate_recall in {label} report ({path}) conflicts with recovered_pairs and unique_pairs."
+        )
 
 
 def _recall_unavailable_reason(base: dict[str, Any], current: dict[str, Any]) -> str | None:
@@ -154,20 +201,11 @@ def _recall_unavailable_reason(base: dict[str, Any], current: dict[str, Any]) ->
     return None
 
 
-def _recall_from_report(truth: dict[str, Any], label: str) -> Fraction:
-    """Use integer counts when available, with the reported decimal as a legacy fallback."""
-    recovered = truth.get("recovered_pairs")
-    unique = truth.get("unique_pairs")
-    reported = truth["candidate_recall"]
-    if type(recovered) is int and type(unique) is int and unique > 0 and 0 <= recovered <= unique:
-        ratio = Fraction(recovered, unique)
-        as_float = float(ratio)
-        if reported not in (as_float, round(as_float, 8)):
-            raise AuditError(
-                f"ground_truth.candidate_recall in {label} report conflicts with recovered_pairs and unique_pairs."
-            )
-        return ratio
-    return Fraction(str(reported))
+def _recall_from_report(truth: dict[str, Any]) -> Fraction:
+    """Return the exact recall from validated counts or a legacy report's stored decimal."""
+    if "unique_pairs" in truth:
+        return Fraction(truth["recovered_pairs"], truth["unique_pairs"])
+    return Fraction(str(truth["candidate_recall"]))
 
 
 def compare_reports(
@@ -228,8 +266,8 @@ def compare_reports(
 
     recall_drop: Fraction | None = None
     if recall_unavailable is None:
-        base_recall = _recall_from_report(base_truth, "Baseline")
-        current_recall = _recall_from_report(curr_truth, "Current")
+        base_recall = _recall_from_report(base_truth)
+        current_recall = _recall_from_report(curr_truth)
         recall_drop = max(Fraction(0), base_recall - current_recall)
 
     base_rows = baseline["inputs"]["candidate_rows"]
