@@ -8,7 +8,7 @@ CandGuard is a small, local-first CLI that audits candidate-pair files and fails
 
 ## Project status
 
-CandGuard is experimental. This README describes **CandGuard 0.2.0**. Run `candguard --version` to see which version you have installed.
+CandGuard is experimental. The latest published release is **CandGuard 0.2.0**. This README also describes fixes in development. Run `candguard --version` to see which version you have installed.
 
 | Version | What it includes |
 |:--|:--|
@@ -166,7 +166,7 @@ candguard audit \
   --max-duplicate-rows 0
 ```
 
-A `--min-recall` gate requires a truth file.
+A `--min-recall` gate requires a truth file. The gate compares the recovered fraction of known pairs against the threshold before rounding recall for the report. Equality passes. With `--min-recall 1.0`, a single missing pair fails the gate even if displayed recall rounds to 100%.
 
 With the `parquet` extra *(0.2.0)*, `.parquet` candidate and truth files are accepted wherever CSV/TSV files are:
 
@@ -223,7 +223,7 @@ Duplicate candidate rows:       20,000 -> 40,000 (+100.00%)
 Candidate recall:               96.5000% -> 94.2000% (drop: 0.0230)
 
 Quality gate: FAIL
-  - candidate recall drop 0.0230 (2.30%) exceeds limit 0.0100 (1.00%)
+  - candidate recall drop 0.0230 (exact drop 23/1000) exceeds limit 0.01
   - candidate row growth 30.00% exceeds limit 20.00%
   - duplicate row growth 100.00% exceeds limit 10.00%
 ```
@@ -231,11 +231,11 @@ Quality gate: FAIL
 ### Threshold and metric semantics
 
 - **Raw candidate rows vs. unique candidate pairs:** raw rows are the blocker's total output before deduplication; unique pairs count each pair once. Pair growth uses raw rows, to guard downstream pipelines against processing explosions.
-- **Recall drop (`--max-recall-drop`):** the absolute decrease `max(0.0, baseline_recall - current_recall)`. A threshold of `0.02` allows up to two percentage points of drop (for example from 95% to 93%). If current recall improves, the drop is `0.0000` and passes.
+- **Recall drop (`--max-recall-drop`)** is the absolute decrease `max(0.0, baseline_recall - current_recall)`. A threshold of `0.02` allows up to two percentage points of drop (for example from 95% to 93%). Compare uses recovered and unique truth-pair counts when available and falls back to reported recall for legacy reports without usable counts. Recall gates use decimal thresholds and pass at equality. JSON recall and recall drop are still rounded to eight decimal places for display.
 - **Pair growth (`--max-pair-growth`):** fractional raw-row growth, `(current - baseline) / baseline`. A threshold of `0.20` permits up to 20% growth.
 - **Duplicate growth (`--max-duplicate-growth`):** fractional duplicate-row growth, `(current - baseline) / baseline`.
-- **Ground-truth comparability:** recall comparisons verify that both reports used exactly the same ground truth. They compare a SHA-256 fingerprint built from an unambiguous, length-prefixed encoding of the truth pairs. Reports record a `fingerprint_version` (currently `v2`). If the fingerprints differ, their versions are incompatible, or a fingerprint is missing, the recall comparison fails safely with exit code 2. Pair-growth and duplicate-growth comparisons do not require ground truth.
-- **Report validation** *(0.2.0)*: `compare` rejects malformed `ground_truth` sections with exit code 2. This covers recall outside `[0, 1]`, NaN, infinity, booleans, non-numeric recall, and empty or non-string fingerprint fields. Reports without ground truth, with absent or `null` recall, or without a `fingerprint_version` (older reports) remain valid.
+- **Ground-truth comparability** requires a recall value and a matching fingerprint in each report. Fingerprint versions must match. An omitted version defaults to `v1`. The current `v2` fingerprint uses SHA-256 over a length-prefixed encoding of the truth pairs. If recall is unavailable or the fingerprints are missing or incompatible, `--max-recall-drop` exits with code 2. Without that gate, compare still evaluates pair-growth and duplicate-growth gates. Text output explains why the drop is unavailable. JSON sets `metrics.recall_drop` to `null` and includes the explanation in `metrics.recall_drop_unavailable_reason`.
+- **Report validation** requires `candidate_rows` to equal `unique_candidate_pairs + duplicate_candidate_rows`. Malformed candidate counts or `ground_truth` fields cause exit code 2. When compare uses truth counts for recall, it checks that they agree with the reported recall at its stored precision. Reports with absent ground truth, absent or `null` recall, or omitted fingerprint versions remain valid inputs.
 
 ### Candidate-set drift *(0.2.0)*
 
@@ -268,6 +268,8 @@ Before reading any input, the CLI rejects (exit code 2) an output path that reso
 - `--missed-pairs-out` cannot be the `--candidates` or `--truth` file;
 - `--candidate-set-out` cannot be an input or the missed-pairs file;
 - `compare --output` cannot be either report or either candidate-set sidecar.
+
+Audit outputs are written in sequence. If a later output fails, an earlier output may already be present, even when the CLI returns exit code 2.
 
 ### Minimal CI example (GitHub Actions)
 

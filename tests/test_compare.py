@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from candguard.audit import AuditError, audit_candidates, report_json
+from candguard.cli import main
 from candguard.compare import compare_reports, render_compare_text
 
 
@@ -14,7 +15,7 @@ def _valid_report(
     *,
     linkage_type: str = "cross",
     candidate_rows: int = 100,
-    unique_candidate_pairs: int = 90,
+    unique_candidate_pairs: int | None = None,
     duplicate_candidate_rows: int = 10,
     candidate_recall: float | None = 0.85,
     fingerprint: str | None = "sha256:abc123def456",
@@ -24,10 +25,6 @@ def _valid_report(
     gt: dict[str, Any] | None = None
     if candidate_recall is not None or fingerprint is not None:
         gt = {
-            "rows": 50,
-            "unique_pairs": 50,
-            "recovered_pairs": int(50 * (candidate_recall or 0.0)),
-            "missed_pairs": 50 - int(50 * (candidate_recall or 0.0)),
             "candidate_recall": candidate_recall,
             "fingerprint": fingerprint,
             "fingerprint_version": fingerprint_version,
@@ -40,7 +37,9 @@ def _valid_report(
             "candidates": "candidates.tsv",
             "truth": "truth.tsv" if gt else None,
             "candidate_rows": candidate_rows,
-            "unique_candidate_pairs": unique_candidate_pairs,
+            "unique_candidate_pairs": (
+                candidate_rows - duplicate_candidate_rows if unique_candidate_pairs is None else unique_candidate_pairs
+            ),
             "duplicate_candidate_rows": duplicate_candidate_rows,
         },
         "coverage": {
@@ -69,6 +68,127 @@ def _valid_report(
 def _write_json(path: Path, data: dict[str, Any]) -> Path:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
+
+
+@pytest.mark.parametrize("parameter", ["max_recall_drop", "max_pair_growth", "max_duplicate_growth", "min_candidate_jaccard"])
+@pytest.mark.parametrize("value", [
+    True, False, -1, "0.2", float("nan"), float("inf"), -float("inf"), [],
+    pytest.param(-(10**400), id="huge-negative-integer"),
+])
+def test_compare_rejects_invalid_numeric_arguments(parameter, value):
+    with pytest.raises(AuditError, match=parameter):
+        compare_reports(baseline_path="unused.json", current_path="unused.json", **{parameter: value})
+
+
+def test_compare_large_integer_thresholds(tmp_path):
+    base, current = _pair_files(tmp_path, _valid_report(), _valid_report(candidate_rows=200))
+    huge = 10**400
+    options = dict(baseline_path=base, current_path=current, max_recall_drop=huge,
+                   max_pair_growth=huge, max_duplicate_growth=huge)
+    assert compare_reports(**options)["quality_gate"]["passed"]
+    with pytest.raises(AuditError, match="min_candidate_jaccard"):
+        compare_reports(**options, min_candidate_jaccard=huge)
+    _write_json(base, _valid_report(candidate_rows=0, duplicate_candidate_rows=0))
+    result = compare_reports(**options)
+    assert not result["quality_gate"]["passed"]
+    assert len(result["quality_gate"]["failures"]) == 2
+
+
+@pytest.mark.parametrize("parameter", [
+    "baseline_path", "current_path", "baseline_candidate_set_path", "current_candidate_set_path",
+])
+def test_compare_rejects_invalid_path_types(tmp_path, parameter):
+    base, current = _pair_files(tmp_path, _valid_report(), _valid_report())
+    options = dict(baseline_path=base, current_path=current, baseline_candidate_set_path=base,
+                   current_candidate_set_path=current)
+    options[parameter] = []
+    with pytest.raises(AuditError, match=parameter):
+        compare_reports(**options)
+
+
+@pytest.mark.parametrize("label", ["Baseline", "Current"])
+@pytest.mark.parametrize(("bad_counts", "fields"), [
+    ({"candidate_rows": 10, "unique_candidate_pairs": 12, "duplicate_candidate_rows": 2},
+     ["candidate_rows", "unique_candidate_pairs", "duplicate_candidate_rows"]),
+    ({"duplicate_candidate_rows": 2}, ["candidate_rows", "unique_candidate_pairs", "duplicate_candidate_rows"]),
+    ({"candidate_rows": True}, ["candidate_rows"]),
+    ({"unique_candidate_pairs": 90.0}, ["unique_candidate_pairs"]),
+    ({"duplicate_candidate_rows": "10"}, ["duplicate_candidate_rows"]),
+])
+def test_compare_rejects_invalid_report_counts(tmp_path, capsys, label, bad_counts, fields):
+    base, current = _valid_report(), _valid_report()
+    (base if label == "Baseline" else current)["inputs"].update(bad_counts)
+    b_f, c_f = _pair_files(tmp_path, base, current)
+    with pytest.raises(AuditError, match=label) as exc:
+        compare_reports(baseline_path=b_f, current_path=c_f)
+    assert all(field in str(exc.value) for field in fields)
+    assert main(["compare", "--baseline", str(b_f), "--current", str(c_f)]) == 2
+    assert label in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("rows", [0, 100])
+def test_compare_consistent_legacy_counts(tmp_path, rows):
+    report = {
+        "schema_version": "1.0",
+        "inputs": {"candidate_rows": rows, "unique_candidate_pairs": rows, "duplicate_candidate_rows": 0},
+        "efficiency": {"linkage_type": "cross"},
+    }
+    b_f, c_f = _pair_files(tmp_path, report, report)
+    assert compare_reports(baseline_path=b_f, current_path=c_f)["quality_gate"]["passed"]
+
+
+@pytest.mark.parametrize(("known", "missed", "threshold", "passed"), [
+    (10**18, 1, 0.0, False),
+    (10**10, 1, 1e-10, True),
+    (10**10, 1, 9e-11, False),
+    (100, 2, 0.02, True),
+])
+def test_compare_recall_gate_uses_counts(tmp_path, known, missed, threshold, passed):
+    base = _valid_report(candidate_rows=known + 10, candidate_recall=1.0)
+    current = _valid_report(candidate_rows=known + 10, candidate_recall=round((known - missed) / known, 8))
+    base["ground_truth"].update(unique_pairs=known, recovered_pairs=known)
+    current["ground_truth"].update(unique_pairs=known, recovered_pairs=known - missed)
+    b_f, c_f = _pair_files(tmp_path, base, current)
+    result = compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=threshold)
+    assert result["metrics"]["recall_drop"] == round(missed / known, 8)
+    assert result["quality_gate"]["passed"] is passed
+
+
+def test_compare_legacy_recall_has_no_absolute_gate_tolerance(tmp_path):
+    b_f, c_f = _pair_files(tmp_path, _valid_report(candidate_recall=0.8), _valid_report(candidate_recall=0.78))
+    result = compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.0199999999)
+    assert not result["quality_gate"]["passed"]
+
+
+def test_compare_rejects_truth_counts_that_contradict_reported_recall(tmp_path):
+    base = _valid_report(candidate_recall=0.9)
+    current = _valid_report(candidate_recall=0.8)
+    current["ground_truth"].update(unique_pairs=100, recovered_pairs=90)
+    b_f, c_f = _pair_files(tmp_path, base, current)
+    with pytest.raises(AuditError, match=r"candidate_recall.*Current report.*recovered_pairs.*unique_pairs"):
+        compare_reports(baseline_path=b_f, current_path=c_f, max_recall_drop=0.0)
+
+
+@pytest.mark.parametrize(("side", "changed", "reason"), [
+    (1, {"fingerprint": "different"}, "Incompatible ground truth"),
+    (1, {"fingerprint_version": "v1"}, "Incompatible ground-truth fingerprint versions"),
+    (0, {"fingerprint": None}, "baseline report lacks ground-truth fingerprint"),
+    (1, {"fingerprint": None}, "current report lacks ground-truth fingerprint"),
+    (0, {"candidate_recall": None}, "baseline report has no candidate recall"),
+    (1, {"candidate_recall": None}, "current report has no candidate recall"),
+])
+def test_compare_unavailable_recall_still_runs_volume_gates(tmp_path, side, changed, reason):
+    reports = (_valid_report(), _valid_report(candidate_rows=200, duplicate_candidate_rows=30, candidate_recall=0.7))
+    reports[side]["ground_truth"].update(changed)
+    b_f, c_f = _pair_files(tmp_path, *reports)
+    options = dict(baseline_path=b_f, current_path=c_f, max_pair_growth=0.2, max_duplicate_growth=0.2)
+    result = compare_reports(**options)
+    assert result["metrics"]["recall_drop"] is None
+    assert reason in result["metrics"]["recall_drop_unavailable_reason"]
+    assert reason in render_compare_text(result)
+    assert len(result["quality_gate"]["failures"]) == 2
+    with pytest.raises(AuditError, match=reason):
+        compare_reports(**options, max_recall_drop=0.2)
 
 
 def test_compare_no_regression(tmp_path: Path) -> None:

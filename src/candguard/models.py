@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, Literal, TypedDict, Union
 
 
 class AuditError(ValueError):
     """Raised when an input file, configuration, or report is invalid."""
+
+
+def argument_path(name: str, value: str | Path) -> Path:
+    """Normalize a user-supplied path with a public API error on an invalid type."""
+    try:
+        return Path(value)
+    except TypeError as exc:
+        raise AuditError(f"{name} must be a string or path-like object.") from exc
 
 
 LinkageType = Literal["cross", "dedupe"]
@@ -173,26 +182,30 @@ def validate_audit_arguments(
     has_missed_pairs_path: bool,
 ) -> None:
     """Validate argument values for candidate auditing."""
-    if linkage_type not in {"cross", "dedupe"}:
+    if linkage_type not in ("cross", "dedupe"):
         raise AuditError("linkage_type must be 'cross' or 'dedupe'.")
-    if left_records is not None and left_records < 0:
-        raise AuditError("left_records cannot be negative.")
-    if right_records is not None and right_records < 0:
-        raise AuditError("right_records cannot be negative.")
+    for name, count in (
+        ("left_records", left_records),
+        ("right_records", right_records),
+        ("max_pairs", max_pairs),
+        ("max_duplicate_rows", max_duplicate_rows),
+    ):
+        if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
+            raise AuditError(f"{name} must be a non-negative integer.")
     if linkage_type == "cross" and ((left_records is None) != (right_records is None)):
         raise AuditError("For cross-dataset reduction ratio, provide both --left-records and --right-records.")
     if linkage_type == "dedupe" and right_records is not None:
         raise AuditError("For dedupe mode, provide only --left-records.")
-    if min_recall is not None and not 0 <= min_recall <= 1:
-        raise AuditError("min_recall must be between 0 and 1.")
+    validate_unit_interval_threshold("min_recall", min_recall)
     if min_recall is not None and not has_truth:
         raise AuditError("--min-recall requires --truth.")
     if has_missed_pairs_path and not has_truth:
         raise AuditError("--missed-pairs-out requires --truth.")
-    if max_pairs is not None and max_pairs < 0:
-        raise AuditError("max_pairs cannot be negative.")
-    if max_duplicate_rows is not None and max_duplicate_rows < 0:
-        raise AuditError("max_duplicate_rows cannot be negative.")
+
+
+def is_unit_interval_number(value: Any) -> bool:
+    """Accept only int or float values in [0, 1]; the range also excludes NaN and infinity."""
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and 0 <= value <= 1
 
 
 def validate_compare_threshold(name: str, threshold: float | None) -> None:
@@ -201,21 +214,13 @@ def validate_compare_threshold(name: str, threshold: float | None) -> None:
         if (
             not isinstance(threshold, (int, float))
             or isinstance(threshold, bool)
-            or math.isnan(threshold)
-            or math.isinf(threshold)
+            or (isinstance(threshold, float) and not math.isfinite(threshold))
             or threshold < 0
         ):
-            raise AuditError(f"{name} must be a finite non-negative number, got {threshold!r}.")
+            raise AuditError(f"{name} must be a finite non-negative number.")
 
 
 def validate_unit_interval_threshold(name: str, threshold: float | None) -> None:
     """Validate an optional threshold that must be a finite number in [0, 1]."""
-    if threshold is not None:
-        if (
-            isinstance(threshold, bool)
-            or not isinstance(threshold, (int, float))
-            or math.isnan(threshold)
-            or math.isinf(threshold)
-            or not 0 <= threshold <= 1
-        ):
-            raise AuditError(f"{name} must be a finite number between 0 and 1, got {threshold!r}.")
+    if threshold is not None and not is_unit_interval_number(threshold):
+        raise AuditError(f"{name} must be a finite number between 0 and 1.")

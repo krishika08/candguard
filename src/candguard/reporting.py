@@ -183,13 +183,17 @@ def render_compare_text(report: dict[str, Any]) -> str:
 
     base_rec = baseline["candidate_recall"]
     curr_rec = current["candidate_recall"]
+    r_drop = metrics["recall_drop"]
     if base_rec is not None and curr_rec is not None:
-        r_drop = metrics["recall_drop"]
-        recall_str = f"{base_rec:.4%} -> {curr_rec:.4%} (drop: {r_drop:.4f})"
+        recall_str = f"{base_rec:.4%} -> {curr_rec:.4%}"
     elif base_rec is not None or curr_rec is not None:
         recall_str = f"{base_rec} -> {curr_rec}"
     else:
         recall_str = "n/a"
+    if r_drop is not None:
+        recall_str += f" (drop: {r_drop:.4f})"
+    elif reason := metrics.get("recall_drop_unavailable_reason"):
+        recall_str += f" (recall drop unavailable: {reason})"
 
     lines = [
         "CandGuard — Regression Comparison Audit",

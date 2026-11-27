@@ -54,6 +54,21 @@ def test_cli_exit_code_2_on_invalid_configuration(tmp_path: Path, capsys: pytest
     assert "candguard: error:" in captured.err
 
 
+@pytest.mark.parametrize(("args", "name"), [
+    (["audit", "--candidates", "unused.tsv", "--truth", "unused.tsv", "--left-id", "l", "--right-id", "r",
+      "--min-recall", "nan"], "min_recall"),
+    (["compare", "--baseline", "unused.json", "--current", "unused.json", "--max-recall-drop", "1e400"],
+     "max_recall_drop"),
+    (["compare", "--baseline", "unused.json", "--current", "unused.json", "--min-candidate-jaccard", "inf"],
+     "min_candidate_jaccard"),
+])
+def test_cli_rejects_nonfinite_thresholds(args, name, capsys):
+    assert main(args) == 2
+    error = capsys.readouterr().err
+    assert "candguard: error:" in error
+    assert name in error
+
+
 def test_cli_exit_code_2_on_missing_column(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     candidates = tmp_path / "cand.tsv"
     candidates.write_text("colA\tcolB\na\tb\n", encoding="utf-8")
@@ -147,7 +162,8 @@ def _sample_report_dict(
         },
         "efficiency": {"linkage_type": "cross", "possible_pairs": 1000, "reduction_ratio": 0.90},
         "ground_truth": {
-            "rows": 50, "unique_pairs": 50, "recovered_pairs": 45, "missed_pairs": 5,
+            "rows": 50, "unique_pairs": 50, "recovered_pairs": round(50 * recall),
+            "missed_pairs": 50 - round(50 * recall),
             "candidate_recall": recall, "fingerprint": fingerprint, "fingerprint_version": "v2",
         },
         "quality_gate": {"passed": True, "failures": []},

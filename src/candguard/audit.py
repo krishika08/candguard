@@ -6,13 +6,14 @@ while preserving full backward compatibility with CandGuard v0.1.0 contracts.
 from __future__ import annotations
 
 import sqlite3
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterator
 
 from . import __version__
 from .candidate_set import ensure_distinct_output
 from .metrics import compute_possible_pairs, compute_record_coverage, compute_reduction_ratio
-from .models import AuditError, validate_audit_arguments
+from .models import AuditError, argument_path, validate_audit_arguments
 from .readers import CandidateReader, DelimitedReader, get_reader, resolve_delimiter
 from .reporting import render_text, report_json
 from .storage import SQLiteStorageEngine, compute_nearest_rank_percentile
@@ -102,9 +103,6 @@ def audit_candidates(
     after a successful audit to a sorted ``candguard-pairs-tsv-v1`` sidecar (written atomically),
     and the report gains a ``candidate_set`` section with its pair count and fingerprint.
     """
-    candidates_file = Path(candidates_path)
-    truth_file = Path(truth_path) if truth_path is not None else None
-
     validate_audit_arguments(
         linkage_type=linkage_type,
         left_records=left_records,
@@ -112,15 +110,28 @@ def audit_candidates(
         min_recall=min_recall,
         max_pairs=max_pairs,
         max_duplicate_rows=max_duplicate_rows,
-        has_truth=truth_file is not None,
+        has_truth=truth_path is not None,
         has_missed_pairs_path=missed_pairs_path is not None,
     )
+    if not isinstance(left_id, str) or not isinstance(right_id, str):
+        raise AuditError("left_id and right_id must be strings.")
+    for name, value in (
+        ("truth_left_id", truth_left_id), ("truth_right_id", truth_right_id),
+        ("delimiter", delimiter), ("truth_delimiter", truth_delimiter),
+    ):
+        if value is not None and not isinstance(value, str):
+            raise AuditError(f"{name} must be a string.")
+
+    candidates_file = argument_path("candidates_path", candidates_path)
+    truth_file = argument_path("truth_path", truth_path) if truth_path is not None else None
+    missed_pairs_file = argument_path("missed_pairs_path", missed_pairs_path) if missed_pairs_path is not None else None
+    candidate_set_file = argument_path("candidate_set_path", candidate_set_path) if candidate_set_path is not None else None
 
     # Every output is checked against every input and every other output before any input is
     # read or any output is opened. The CLI additionally checks --output against all of these.
-    if missed_pairs_path is not None:
+    if missed_pairs_file is not None:
         ensure_distinct_output(
-            Path(missed_pairs_path),
+            missed_pairs_file,
             {
                 "candidate input file": candidates_file,
                 "ground-truth input file": truth_file,
@@ -128,14 +139,13 @@ def audit_candidates(
             description="Missed-pairs output path",
             flag="--missed-pairs-out",
         )
-    candidate_set_file = Path(candidate_set_path) if candidate_set_path is not None else None
     if candidate_set_file is not None:
         ensure_distinct_output(
             candidate_set_file,
             {
                 "candidate input file": candidates_file,
                 "ground-truth input file": truth_file,
-                "missed-pairs output file": missed_pairs_path,
+                "missed-pairs output file": missed_pairs_file,
             },
         )
 
@@ -212,6 +222,7 @@ def audit_candidates(
             right_records=right_records if linkage_type == "cross" else None,
         )
 
+        failures: list[str] = []
         ground_truth: dict[str, Any] | None = None
         if truth_file is not None and truth_reader is not None:
             truth_rows, truth_unique = engine.ingest_truth(truth_reader, linkage_type=linkage_type)
@@ -236,16 +247,14 @@ def audit_candidates(
                 "fingerprint_version": "v2",
             }
 
-            if missed_pairs_path is not None:
-                out_path = Path(missed_pairs_path)
-                engine.export_missed_pairs(out_path, truth_left, truth_right)
-                ground_truth["missed_pairs_file"] = str(out_path)
+            # Interpret a float threshold by its decimal spelling, as with a CLI threshold.
+            if min_recall is not None and Fraction(recovered, truth_unique) < Fraction(str(float(min_recall))):
+                failures.append(f"candidate recall ({recovered}/{truth_unique}) is below required {min_recall}")
 
-        failures: list[str] = []
-        if min_recall is not None:
-            measured = ground_truth["candidate_recall"] if ground_truth else None
-            if measured is None or measured < min_recall:
-                failures.append(f"candidate recall {measured} is below required {min_recall:.4f}")
+            if missed_pairs_file is not None:
+                engine.export_missed_pairs(missed_pairs_file, truth_left, truth_right)
+                ground_truth["missed_pairs_file"] = str(missed_pairs_file)
+
         if max_pairs is not None and unique_candidate_pairs > max_pairs:
             failures.append(f"unique candidate pairs {unique_candidate_pairs} exceed limit {max_pairs}")
         if max_duplicate_rows is not None and duplicate_rows > max_duplicate_rows:
@@ -270,8 +279,8 @@ def audit_candidates(
             "quality_gate": {"passed": not failures, "failures": failures},
         }
 
-        # Export last, after every other step (including ground truth) succeeded, so a failed
-        # audit never leaves a sidecar behind. Gate failures are results, not errors.
+        # Export after metrics and the missed-pairs export. The candidate-set writer replaces
+        # its own output atomically. Earlier outputs may already exist if this export fails.
         if candidate_set_file is not None:
             report["candidate_set"] = engine.export_candidate_set(
                 candidate_set_file,

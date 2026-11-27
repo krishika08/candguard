@@ -48,7 +48,10 @@ def compute_mean_degree_ratio(left: dict[str, Any], right: dict[str, Any]) -> fl
     left_s, right_s = int(left["total_degree"]), int(right["total_degree"])
     if left_n == 0 or right_n == 0 or left_s == 0:
         return None
-    return _round(float(Fraction(right_s * left_n, right_n * left_s)))
+    try:
+        return _round(float(Fraction(right_s * left_n, right_n * left_s)))
+    except OverflowError as exc:
+        raise AuditError("The record totals produce a mean degree ratio too large to report.") from exc
 
 
 def compute_record_coverage(
