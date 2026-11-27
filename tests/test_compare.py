@@ -550,6 +550,102 @@ def _with_truth(report: dict[str, Any], **fields: Any) -> dict[str, Any]:
     return report
 
 
+@pytest.mark.parametrize("side", ["Baseline", "Current"])
+@pytest.mark.parametrize("gate", [None, 0.0], ids=["diagnostic", "gated"])
+@pytest.mark.parametrize(
+    ("counts", "recall", "fields"),
+    [
+        pytest.param({"rows": -1, "unique_pairs": 10, "recovered_pairs": 10}, 1.0, ("rows",), id="negative-rows"),
+        pytest.param({"unique_pairs": -1, "recovered_pairs": 0}, 1.0, ("unique_pairs",), id="negative-unique"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": -1, "missed_pairs": 11}, 1.0,
+                     ("recovered_pairs",), id="fallback-bypass"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": 10, "missed_pairs": -1}, 1.0,
+                     ("missed_pairs",), id="negative-missed"),
+        pytest.param({"rows": True, "unique_pairs": 1, "recovered_pairs": 1}, 1.0, ("rows",), id="bool-rows"),
+        pytest.param({"unique_pairs": 1, "recovered_pairs": True}, 1.0, ("recovered_pairs",), id="bool-recovered"),
+        pytest.param({"unique_pairs": 10.0, "recovered_pairs": 10}, 1.0, ("unique_pairs",), id="float-unique"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": 10, "missed_pairs": "0"}, 1.0,
+                     ("missed_pairs",), id="string-missed"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": None}, 1.0, ("recovered_pairs",), id="null-recovered"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": 11}, 1.0,
+                     ("recovered_pairs", "unique_pairs"), id="too-many-recovered"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": 10, "missed_pairs": 1}, 1.0,
+                     ("recovered_pairs", "missed_pairs", "unique_pairs"), id="wrong-missed"),
+        pytest.param({"rows": 9, "unique_pairs": 10, "recovered_pairs": 10}, 1.0,
+                     ("rows", "unique_pairs"), id="too-few-rows"),
+        pytest.param({"unique_pairs": 10}, 1.0, ("unique_pairs", "recovered_pairs"), id="unique-only"),
+        pytest.param({"recovered_pairs": 10}, 1.0, ("unique_pairs", "recovered_pairs"), id="recovered-only"),
+        pytest.param({"rows": 10}, 1.0, ("rows", "unique_pairs", "recovered_pairs"), id="rows-only"),
+        pytest.param({"missed_pairs": 0}, 1.0, ("missed_pairs", "unique_pairs", "recovered_pairs"), id="missed-only"),
+        pytest.param({"unique_pairs": 0, "recovered_pairs": 1}, None,
+                     ("recovered_pairs", "unique_pairs"), id="empty-recovered"),
+        pytest.param({"unique_pairs": 0, "recovered_pairs": 0, "missed_pairs": 1}, None,
+                     ("missed_pairs", "unique_pairs"), id="empty-missed"),
+        pytest.param({"unique_pairs": 0, "recovered_pairs": 0}, 0.0,
+                     ("candidate_recall", "unique_pairs"), id="empty-numeric-recall"),
+        pytest.param({"unique_pairs": 10, "recovered_pairs": 9}, 1.0,
+                     ("candidate_recall", "recovered_pairs", "unique_pairs"), id="wrong-recall"),
+    ],
+)
+def test_ground_truth_count_validation_rejects_invalid_reports(tmp_path, capsys, side, gate, counts, recall, fields):
+    bad = _with_truth(_valid_report(), candidate_recall=recall, **counts)
+    good = _valid_report(candidate_recall=1.0)
+    base, current = _pair_files(tmp_path, *((bad, good) if side == "Baseline" else (good, bad)))
+
+    # A stored 1.0 must never turn invalid count metadata into a passing recall gate.
+    with pytest.raises(AuditError, match=f"{side} report") as exc:
+        compare_reports(baseline_path=base, current_path=current, max_recall_drop=gate)
+    assert all(field in str(exc.value) for field in fields)
+
+    args = ["compare", "--baseline", str(base), "--current", str(current)]
+    if gate is not None:
+        args.extend(["--max-recall-drop", str(gate)])
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("candguard: error:")
+    assert f"{side} report" in captured.err
+    assert all(field in captured.err for field in fields)
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("counts", "reported"),
+    [
+        pytest.param({}, 0.66666667, id="legacy-without-counts"),
+        pytest.param({"unique_pairs": 3, "recovered_pairs": 2}, 0.66666667, id="exact-counts-only"),
+        pytest.param({"rows": 4, "unique_pairs": 3, "recovered_pairs": 2, "missed_pairs": 1},
+                     0.66666667, id="complete-with-duplicate-truth-row"),
+        pytest.param({"rows": 4, "unique_pairs": 3, "recovered_pairs": 2, "missed_pairs": 1},
+                     2 / 3, id="consistent-unrounded-recall"),
+        pytest.param({"rows": 10**400, "unique_pairs": 10**400, "recovered_pairs": 10**400 - 1, "missed_pairs": 1},
+                     1.0, id="large-integer-counts"),
+    ],
+)
+def test_ground_truth_count_validation_accepts_compatible_reports(tmp_path, counts, reported):
+    report = _with_truth(_valid_report(), candidate_recall=reported, **counts)
+    base, current = _pair_files(tmp_path, report, report)
+    result = compare_reports(baseline_path=base, current_path=current, max_recall_drop=0.0)
+    assert result["quality_gate"]["passed"] is True
+    assert result["metrics"]["recall_drop"] == 0.0
+
+
+@pytest.mark.parametrize("unique", [0, 10], ids=["empty", "nonempty"])
+@pytest.mark.parametrize("include_null_recall", [True, False], ids=["null", "omitted"])
+def test_ground_truth_count_validation_accepts_unavailable_recall(tmp_path, unique, include_null_recall):
+    report = _with_truth(_valid_report(), rows=unique, unique_pairs=unique, recovered_pairs=0, missed_pairs=unique)
+    if include_null_recall:
+        report["ground_truth"]["candidate_recall"] = None
+    else:
+        del report["ground_truth"]["candidate_recall"]
+    base, current = _pair_files(tmp_path, report, report)
+    result = compare_reports(baseline_path=base, current_path=current, max_pair_growth=0.0)
+    assert result["quality_gate"]["passed"] is True
+    assert result["metrics"]["recall_drop"] is None
+    with pytest.raises(AuditError, match="baseline report has no candidate recall"):
+        compare_reports(baseline_path=base, current_path=current, max_recall_drop=0.0)
+
+
 def test_out_of_range_current_recall_no_longer_passes_recall_gate(tmp_path: Path) -> None:
     # Before the fix, recall 1.2 produced recall_drop = max(0, 0.9 - 1.2) = 0 and PASSED the gate.
     b_f, c_f = _pair_files(tmp_path, _valid_report(candidate_recall=0.9), _valid_report(candidate_recall=1.2))
