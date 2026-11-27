@@ -139,6 +139,21 @@ def test_cli_delimiter_override_tab(tmp_path: Path) -> None:
     assert code == 0
 
 
+@pytest.mark.parametrize("option", ["--delimiter", "--truth-delimiter"])
+@pytest.mark.parametrize("value", ['"', r"\r", r"\n"])
+def test_cli_invalid_delimiter(tmp_path, capsys, option, value):
+    pairs = tmp_path / "pairs.csv"
+    pairs.write_text("s,c\na,b\n", encoding="utf-8")
+    code = main([
+        "audit", "--candidates", str(pairs), "--truth", str(pairs),
+        "--left-id", "s", "--right-id", "c", option, value,
+    ])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "candguard: error: Unsupported delimiter" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+
 def _sample_report_dict(
     rows: int = 100,
     dupes: int = 10,
