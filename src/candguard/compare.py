@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import json
 import math
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .candidate_set import compare_candidate_set_artifacts, validate_candidate_set_metadata
 from .metrics import compute_candidate_set_drift, compute_relative_growth
-from .models import AuditError, validate_compare_threshold, validate_unit_interval_threshold
+from .models import (
+    AuditError,
+    argument_path,
+    is_unit_interval_number,
+    validate_compare_threshold,
+    validate_unit_interval_threshold,
+)
 from .reporting import render_compare_text
 
 __all__ = [
@@ -20,7 +27,7 @@ __all__ = [
 
 
 def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]]:
-    path = Path(path_str)
+    path = argument_path(f"{label.lower()}_path", path_str)
     if not path.exists():
         raise AuditError(f"{label} file does not exist: {path}")
     if not path.is_file():
@@ -63,8 +70,18 @@ def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]
                 f"expected non-negative integer, got {val!r}."
             )
 
+    rows = inputs["candidate_rows"]
+    unique = inputs["unique_candidate_pairs"]
+    duplicates = inputs["duplicate_candidate_rows"]
+    if rows != unique + duplicates:  # Non-negative duplicates also imply unique <= rows.
+        raise AuditError(
+            f"Inconsistent candidate counts in {label} report ({path}): "
+            "candidate_rows must equal unique_candidate_pairs plus duplicate_candidate_rows "
+            f"(got {rows}, {unique}, and {duplicates}, respectively)."
+        )
+
     efficiency = data.get("efficiency")
-    if not isinstance(efficiency, dict) or efficiency.get("linkage_type") not in {"cross", "dedupe"}:
+    if not isinstance(efficiency, dict) or efficiency.get("linkage_type") not in ("cross", "dedupe"):
         raise AuditError(
             f"Missing or invalid 'efficiency.linkage_type' in {label} report ({path}): "
             "expected 'cross' or 'dedupe'."
@@ -72,21 +89,6 @@ def _load_report(path_str: str | Path, label: str) -> tuple[Path, dict[str, Any]
 
     _validate_ground_truth(data, label, path)
     return path, data
-
-
-def _is_valid_recall(value: Any) -> bool:
-    """Return True for an int or finite float in [0, 1]; booleans and other types are invalid.
-
-    Integers are range-checked directly: ``math.isfinite()`` would raise OverflowError for
-    integers too large to convert to float (JSON allows arbitrarily long integer literals).
-    """
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return 0 <= value <= 1
-    if isinstance(value, float):
-        return math.isfinite(value) and 0.0 <= value <= 1.0
-    return False
 
 
 def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None:
@@ -107,7 +109,7 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
         )
 
     recall = truth.get("candidate_recall")
-    if recall is not None and not _is_valid_recall(recall):
+    if recall is not None and not is_unit_interval_number(recall):
         raise AuditError(
             f"Invalid 'ground_truth.candidate_recall' in {label} report ({path}): "
             f"expected a finite number between 0 and 1 or null, got {recall!r}."
@@ -127,6 +129,45 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
                 f"Invalid 'ground_truth.fingerprint_version' in {label} report ({path}): "
                 f"expected a non-empty string (omit it for legacy reports), got {version!r}."
             )
+
+
+def _recall_unavailable_reason(base: dict[str, Any], current: dict[str, Any]) -> str | None:
+    for label, truth in (("baseline", base), ("current", current)):
+        if truth.get("candidate_recall") is None:
+            return f"{label} report has no candidate recall."
+    for label, truth in (("baseline", base), ("current", current)):
+        if not truth.get("fingerprint"):
+            return f"{label} report lacks ground-truth fingerprint for comparability verification."
+
+    base_version = base.get("fingerprint_version", "v1")
+    current_version = current.get("fingerprint_version", "v1")
+    if base_version != current_version:
+        return (
+            f"Incompatible ground-truth fingerprint versions: baseline uses '{base_version}', "
+            f"current uses '{current_version}'. Re-run audit with the same CandGuard version to compare recall."
+        )
+    if base["fingerprint"] != current["fingerprint"]:
+        return (
+            f"Incompatible ground truth: baseline fingerprint ({base['fingerprint']}) does not match "
+            f"current fingerprint ({current['fingerprint']}). Recall comparisons require identical ground truth."
+        )
+    return None
+
+
+def _recall_from_report(truth: dict[str, Any], label: str) -> Fraction:
+    """Use integer counts when available, with the reported decimal as a legacy fallback."""
+    recovered = truth.get("recovered_pairs")
+    unique = truth.get("unique_pairs")
+    reported = truth["candidate_recall"]
+    if type(recovered) is int and type(unique) is int and unique > 0 and 0 <= recovered <= unique:
+        ratio = Fraction(recovered, unique)
+        as_float = float(ratio)
+        if reported not in (as_float, round(as_float, 8)):
+            raise AuditError(
+                f"ground_truth.candidate_recall in {label} report conflicts with recovered_pairs and unique_pairs."
+            )
+        return ratio
+    return Fraction(str(reported))
 
 
 def compare_reports(
@@ -179,51 +220,17 @@ def compare_reports(
             f"current is '{curr_linkage}'."
         )
 
-    base_truth = baseline.get("ground_truth")
-    curr_truth = current.get("ground_truth")
+    base_truth = baseline.get("ground_truth") or {}
+    curr_truth = current.get("ground_truth") or {}
+    recall_unavailable = _recall_unavailable_reason(base_truth, curr_truth)
+    if recall_unavailable is not None and max_recall_drop is not None:
+        raise AuditError(recall_unavailable)
 
-    if max_recall_drop is not None:
-        if base_truth is None or base_truth.get("candidate_recall") is None:
-            raise AuditError("Cannot evaluate --max-recall-drop: baseline report has no candidate recall.")
-        if curr_truth is None or curr_truth.get("candidate_recall") is None:
-            raise AuditError("Cannot evaluate --max-recall-drop: current report has no candidate recall.")
-
-        base_fp = base_truth.get("fingerprint")
-        curr_fp = curr_truth.get("fingerprint")
-        if not base_fp:
-            raise AuditError(
-                "Cannot evaluate --max-recall-drop: baseline report lacks ground-truth fingerprint "
-                "for comparability verification."
-            )
-        if not curr_fp:
-            raise AuditError(
-                "Cannot evaluate --max-recall-drop: current report lacks ground-truth fingerprint "
-                "for comparability verification."
-            )
-        base_fp_ver = base_truth.get("fingerprint_version", "v1")
-        curr_fp_ver = curr_truth.get("fingerprint_version", "v1")
-        if base_fp_ver != curr_fp_ver:
-            raise AuditError(
-                f"Incompatible ground-truth fingerprint versions: baseline uses '{base_fp_ver}', "
-                f"current uses '{curr_fp_ver}'. Re-run audit with the same CandGuard version to compare recall."
-            )
-        if base_fp != curr_fp:
-            raise AuditError(
-                f"Incompatible ground truth: baseline fingerprint ({base_fp}) does not match "
-                f"current fingerprint ({curr_fp}). Recall comparisons require identical ground truth."
-            )
-
-    # Metric computations
-    recall_drop: float | None = None
-    if (
-        base_truth is not None
-        and base_truth.get("candidate_recall") is not None
-        and curr_truth is not None
-        and curr_truth.get("candidate_recall") is not None
-    ):
-        base_rec = float(base_truth["candidate_recall"])
-        curr_rec = float(curr_truth["candidate_recall"])
-        recall_drop = max(0.0, base_rec - curr_rec)
+    recall_drop: Fraction | None = None
+    if recall_unavailable is None:
+        base_recall = _recall_from_report(base_truth, "Baseline")
+        current_recall = _recall_from_report(curr_truth, "Current")
+        recall_drop = max(Fraction(0), base_recall - current_recall)
 
     base_rows = baseline["inputs"]["candidate_rows"]
     curr_rows = current["inputs"]["candidate_rows"]
@@ -235,22 +242,21 @@ def compare_reports(
 
     # Threshold gate evaluation
     failures: list[str] = []
-    if max_recall_drop is not None:
-        if recall_drop is None:
-            failures.append("candidate recall is missing but --max-recall-drop was configured")
-        elif recall_drop - max_recall_drop > 1e-9:
+    if max_recall_drop is not None and recall_drop is not None:
+        limit = Fraction(max_recall_drop) if isinstance(max_recall_drop, int) else Fraction(str(max_recall_drop))
+        if recall_drop > limit:
+            displayed_drop = float(recall_drop)
             failures.append(
-                f"candidate recall drop {recall_drop:.4f} ({recall_drop:.2%}) "
-                f"exceeds limit {max_recall_drop:.4f} ({max_recall_drop:.2%})"
+                f"candidate recall drop {displayed_drop:.4f} (exact drop {recall_drop}) "
+                f"exceeds limit {max_recall_drop}"
             )
 
     if max_pair_growth is not None:
         if math.isinf(pair_growth):
             failures.append(
-                f"candidate rows grew from 0 to {curr_rows} "
-                f"(unbounded growth exceeds limit {max_pair_growth:.2%})"
+                f"candidate rows grew from 0 to {curr_rows} (unbounded growth exceeds any finite limit)"
             )
-        elif pair_growth - max_pair_growth > 1e-9:
+        elif pair_growth > max_pair_growth and pair_growth - max_pair_growth > 1e-9:
             failures.append(
                 f"candidate row growth {pair_growth:.2%} exceeds limit {max_pair_growth:.2%}"
             )
@@ -258,10 +264,9 @@ def compare_reports(
     if max_duplicate_growth is not None:
         if math.isinf(duplicate_growth):
             failures.append(
-                f"duplicate candidate rows grew from 0 to {curr_dupes} "
-                f"(unbounded growth exceeds limit {max_duplicate_growth:.2%})"
+                f"duplicate candidate rows grew from 0 to {curr_dupes} (unbounded growth exceeds any finite limit)"
             )
-        elif duplicate_growth - max_duplicate_growth > 1e-9:
+        elif duplicate_growth > max_duplicate_growth and duplicate_growth - max_duplicate_growth > 1e-9:
             failures.append(
                 f"duplicate row growth {duplicate_growth:.2%} exceeds limit {max_duplicate_growth:.2%}"
             )
@@ -294,7 +299,7 @@ def compare_reports(
             "ground_truth_fingerprint_version": curr_truth.get("fingerprint_version", "v1") if curr_truth else None,
         },
         "metrics": {
-            "recall_drop": round(recall_drop, 8) if recall_drop is not None else None,
+            "recall_drop": round(float(recall_drop), 8) if recall_drop is not None else None,
             "candidate_pair_growth": None if math.isinf(pair_growth) else round(pair_growth, 8),
             "candidate_pair_growth_unbounded": math.isinf(pair_growth),
             "duplicate_row_growth": None if math.isinf(duplicate_growth) else round(duplicate_growth, 8),
@@ -311,14 +316,17 @@ def compare_reports(
         },
     }
 
+    if recall_unavailable is not None:
+        report["metrics"]["recall_drop_unavailable_reason"] = recall_unavailable
+
     if baseline_candidate_set_path is not None and current_candidate_set_path is not None:
         drift = _candidate_set_drift(
             baseline=baseline,
             current=current,
             baseline_file=baseline_file,
             current_file=current_file,
-            baseline_artifact=Path(baseline_candidate_set_path),
-            current_artifact=Path(current_candidate_set_path),
+            baseline_artifact=argument_path("baseline_candidate_set_path", baseline_candidate_set_path),
+            current_artifact=argument_path("current_candidate_set_path", current_candidate_set_path),
             report=report,
         )
         report["metrics"]["candidate_set_drift"] = drift

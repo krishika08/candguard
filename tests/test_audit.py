@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from candguard.audit import AuditError, audit_candidates, render_text, report_json
+from candguard.cli import main
+from candguard.storage import SQLiteStorageEngine
 
 
 def write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> None:
@@ -15,6 +17,73 @@ def write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> Non
         writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
         writer.writerow(header)
         writer.writerows(rows)
+
+
+@pytest.mark.parametrize("parameter", ["left_records", "right_records", "max_pairs", "max_duplicate_rows", "min_recall"])
+@pytest.mark.parametrize("value", [True, False, -1, "2", float("nan"), float("inf"), -float("inf"), []])
+def test_audit_rejects_invalid_numeric_arguments(parameter, value):
+    options = {"left_records": 2, "right_records": 2, parameter: value}
+    with pytest.raises(AuditError, match=parameter):
+        audit_candidates(candidates_path="unused.tsv", truth_path="unused.tsv", left_id="l", right_id="r", **options)
+
+
+@pytest.mark.parametrize("parameter", ["left_records", "right_records", "max_pairs", "max_duplicate_rows"])
+def test_audit_rejects_fractional_counts(parameter):
+    options = {"left_records": 2, "right_records": 2, parameter: 2.5}
+    with pytest.raises(AuditError, match=parameter):
+        audit_candidates(candidates_path="unused.tsv", left_id="l", right_id="r", **options)
+
+
+@pytest.mark.parametrize("parameter", [
+    "candidates_path", "truth_path", "missed_pairs_path", "candidate_set_path",
+    "left_id", "right_id", "truth_left_id", "truth_right_id", "delimiter", "truth_delimiter",
+])
+def test_audit_rejects_invalid_path_and_text_argument_types(tmp_path, parameter):
+    candidates = tmp_path / "candidates.tsv"
+    write_tsv(candidates, ["l", "r"], [("a", "b")])
+    options = dict(candidates_path=candidates, truth_path=candidates, left_id="l", right_id="r")
+    options[parameter] = []
+    with pytest.raises(AuditError, match=parameter):
+        audit_candidates(**options)
+
+
+def test_audit_large_integer_arguments(tmp_path):
+    candidates = tmp_path / "candidates.tsv"
+    write_tsv(candidates, ["l", "r"], [("a", "b")])
+    huge = 10**400
+    options = dict(candidates_path=candidates, left_id="l", right_id="r")
+    report = audit_candidates(**options, left_records=huge, right_records=huge,
+                              max_pairs=huge, max_duplicate_rows=huge)
+    assert report["efficiency"]["possible_pairs"] == huge**2
+    assert report["quality_gate"]["passed"]
+    with pytest.raises(AuditError, match="min_recall"):
+        audit_candidates(**options, truth_path=candidates, min_recall=huge)
+    with pytest.raises(AuditError, match="record totals"):
+        audit_candidates(**options, left_records=huge, right_records=1)
+
+
+@pytest.mark.parametrize(("known", "recovered", "threshold", "expected_exit", "displayed"), [
+    (10**18, 10**18 - 1, "1.0", 1, 1.0),
+    (10**18, 10**18, "1.0", 0, 1.0),
+    (100, 95, "0.95", 0, 0.95),
+    (3, 2, "0.66666667", 1, 0.66666667),
+    (10**10, 9_499_999_999, "0.95", 1, 0.95),
+])
+def test_audit_recall_gate_uses_counts(tmp_path, monkeypatch, capsys, known, recovered, threshold, expected_exit, displayed):
+    candidates = tmp_path / "candidates.tsv"
+    write_tsv(candidates, ["l", "r"], [("a", "b")])
+    monkeypatch.setattr(SQLiteStorageEngine, "ingest_truth", lambda *args, **kwargs: (known, known))
+    monkeypatch.setattr(
+        SQLiteStorageEngine, "evaluate_ground_truth",
+        lambda *args, **kwargs: (recovered, known - recovered, round(recovered / known, 8), "sha256:test"),
+    )
+    exit_code = main([
+        "audit", "--candidates", str(candidates), "--truth", str(candidates),
+        "--left-id", "l", "--right-id", "r", "--min-recall", threshold, "--format", "json",
+    ])
+    report = json.loads(capsys.readouterr().out)
+    assert report["ground_truth"]["candidate_recall"] == displayed
+    assert exit_code == expected_exit
 
 
 def test_audit_recall_duplicates_distribution_and_reduction(tmp_path: Path) -> None:

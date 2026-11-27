@@ -720,7 +720,10 @@ def _edit_report(path: Path, edit) -> None:  # type: ignore[no-untyped-def]
 METADATA_PROBLEMS = {
     "count-mismatch": (lambda d: d["candidate_set"].update(unique_pairs=3), "does not match inputs.unique_candidate_pairs"),
     "count-and-inputs-mismatch": (
-        lambda d: (d["candidate_set"].update(unique_pairs=5), d["inputs"].update(unique_candidate_pairs=5)),
+        lambda d: (
+            d["candidate_set"].update(unique_pairs=5),
+            d["inputs"].update(candidate_rows=5, unique_candidate_pairs=5),
+        ),
         "more pairs than the 5|contains 4 pair",
     ),
     "wrong-fingerprint": (lambda d: d["candidate_set"].update(fingerprint="sha256:" + "0" * 64), "fingerprint"),
