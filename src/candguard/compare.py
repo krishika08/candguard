@@ -115,7 +115,7 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
             f"expected a finite number between 0 and 1 or null, got {recall!r}."
         )
 
-    _validate_ground_truth_counts(truth, label, path)
+    _validate_ground_truth_counts(truth, label, path, data["inputs"]["unique_candidate_pairs"])
 
     fingerprint = truth.get("fingerprint")
     if fingerprint is not None and (not isinstance(fingerprint, str) or not fingerprint):
@@ -133,7 +133,9 @@ def _validate_ground_truth(data: dict[str, Any], label: str, path: Path) -> None
             )
 
 
-def _validate_ground_truth_counts(truth: dict[str, Any], label: str, path: Path) -> None:
+def _validate_ground_truth_counts(
+    truth: dict[str, Any], label: str, path: Path, unique_candidate_pairs: int,
+) -> None:
     counts: dict[str, int] = {}
     for field in ("rows", "unique_pairs", "recovered_pairs", "missed_pairs"):
         if field not in truth:
@@ -159,6 +161,11 @@ def _validate_ground_truth_counts(truth: dict[str, Any], label: str, path: Path)
         )
     if recovered > unique:
         raise AuditError(f"Inconsistent {context}: recovered_pairs cannot exceed unique_pairs.")
+    if recovered > unique_candidate_pairs:
+        raise AuditError(
+            f"Inconsistent {context}: recovered_pairs ({recovered}) cannot exceed "
+            f"inputs.unique_candidate_pairs ({unique_candidate_pairs})."
+        )
     if "missed_pairs" in counts and recovered + counts["missed_pairs"] != unique:
         raise AuditError(f"Inconsistent {context}: recovered_pairs plus missed_pairs must equal unique_pairs.")
     if "rows" in counts and counts["rows"] < unique:
@@ -289,25 +296,26 @@ def compare_reports(
                 f"exceeds limit {max_recall_drop}"
             )
 
-    if max_pair_growth is not None:
-        if math.isinf(pair_growth):
-            failures.append(
-                f"candidate rows grew from 0 to {curr_rows} (unbounded growth exceeds any finite limit)"
-            )
-        elif pair_growth > max_pair_growth and pair_growth - max_pair_growth > 1e-9:
-            failures.append(
-                f"candidate row growth {pair_growth:.2%} exceeds limit {max_pair_growth:.2%}"
-            )
-
-    if max_duplicate_growth is not None:
-        if math.isinf(duplicate_growth):
-            failures.append(
-                f"duplicate candidate rows grew from 0 to {curr_dupes} (unbounded growth exceeds any finite limit)"
-            )
-        elif duplicate_growth > max_duplicate_growth and duplicate_growth - max_duplicate_growth > 1e-9:
-            failures.append(
-                f"duplicate row growth {duplicate_growth:.2%} exceeds limit {max_duplicate_growth:.2%}"
-            )
+    for label, base, current_count, threshold in (
+        ("candidate", base_rows, curr_rows, max_pair_growth),
+        ("duplicate", base_dupes, curr_dupes, max_duplicate_growth),
+    ):
+        if threshold is None:
+            continue
+        if base == 0:
+            if current_count:
+                rows = "candidate rows" if label == "candidate" else "duplicate candidate rows"
+                failures.append(f"{rows} grew from 0 to {current_count} (unbounded growth exceeds any finite limit)")
+            continue
+        growth = Fraction(current_count - base, base)
+        limit = Fraction(threshold) if isinstance(threshold, int) else Fraction(str(threshold))
+        if growth > limit:
+            measured = f"{float(growth):.2%}"
+            allowed = f"{threshold:.2%}"
+            if measured == allowed:
+                failures.append(f"{label} row growth ({current_count - base}/{base}) exceeds limit {threshold}")
+            else:
+                failures.append(f"{label} row growth {measured} exceeds limit {allowed}")
 
     report: dict[str, Any] = {
         "tool": "candguard",

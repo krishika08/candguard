@@ -276,6 +276,27 @@ def test_compare_duplicate_growth_pass_fail(tmp_path: Path) -> None:
     assert any("duplicate row growth" in f for f in res_fail["quality_gate"]["failures"])
 
 
+@pytest.mark.parametrize("gate", ["max_pair_growth", "max_duplicate_growth"])
+@pytest.mark.parametrize(("base_count", "current_count", "limit", "passed"), [
+    (2_000_000_001, 2_000_000_002, 0.0, False),
+    (10**18, 12 * 10**17, 0.2, True),
+    (10**18, 12 * 10**17 + 1, 0.2, False),
+])
+def test_growth_gate_exact_boundary(tmp_path, gate, base_count, current_count, limit, passed):
+    def report(count):
+        if gate == "max_pair_growth":
+            return _valid_report(candidate_rows=count, duplicate_candidate_rows=0)
+        return _valid_report(candidate_rows=count + 1, duplicate_candidate_rows=count)
+
+    base, current = _pair_files(tmp_path, report(base_count), report(current_count))
+    result = compare_reports(baseline_path=base, current_path=current, **{gate: limit})
+    assert result["quality_gate"]["passed"] is passed
+    if not passed:
+        failure, = result["quality_gate"]["failures"]
+        assert f"{current_count - base_count}/{base_count}" in failure
+        assert f"exceeds limit {limit}" in failure
+
+
 def test_compare_baseline_counts_zero(tmp_path: Path) -> None:
     # 1. 0 to 0 -> growth is 0.0 and passes
     base_zero = _valid_report(candidate_rows=0, duplicate_candidate_rows=0)
@@ -569,6 +590,8 @@ def _with_truth(report: dict[str, Any], **fields: Any) -> dict[str, Any]:
         pytest.param({"unique_pairs": 10, "recovered_pairs": None}, 1.0, ("recovered_pairs",), id="null-recovered"),
         pytest.param({"unique_pairs": 10, "recovered_pairs": 11}, 1.0,
                      ("recovered_pairs", "unique_pairs"), id="too-many-recovered"),
+        pytest.param({"unique_pairs": 91, "recovered_pairs": 91}, 1.0,
+                     ("recovered_pairs", "inputs.unique_candidate_pairs"), id="more-recovered-than-candidates"),
         pytest.param({"unique_pairs": 10, "recovered_pairs": 10, "missed_pairs": 1}, 1.0,
                      ("recovered_pairs", "missed_pairs", "unique_pairs"), id="wrong-missed"),
         pytest.param({"rows": 9, "unique_pairs": 10, "recovered_pairs": 10}, 1.0,
@@ -623,7 +646,9 @@ def test_ground_truth_count_validation_rejects_invalid_reports(tmp_path, capsys,
     ],
 )
 def test_ground_truth_count_validation_accepts_compatible_reports(tmp_path, counts, reported):
-    report = _with_truth(_valid_report(), candidate_recall=reported, **counts)
+    # Include enough candidates for the recovery claim, including the large-integer boundary.
+    recovered = counts.get("recovered_pairs", 0)
+    report = _with_truth(_valid_report(candidate_rows=recovered + 10), candidate_recall=reported, **counts)
     base, current = _pair_files(tmp_path, report, report)
     result = compare_reports(baseline_path=base, current_path=current, max_recall_drop=0.0)
     assert result["quality_gate"]["passed"] is True
